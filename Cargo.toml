@@ -504,6 +504,7 @@ sources-logs = [
   "sources-aws_kinesis_firehose",
   "sources-aws_s3",
   "sources-aws_sqs",
+  "sources-azure_container",
   "sources-datadog_agent",
   "sources-demo_logs",
   "sources-docker_logs",
@@ -550,6 +551,7 @@ sources-aws_ecs_metrics = ["sources-utils-http-client"]
 sources-aws_kinesis_firehose = ["dep:base64", "dep:infer"]
 sources-aws_s3 = ["aws-core", "dep:aws-sdk-sqs", "dep:aws-sdk-s3", "dep:semver", "dep:async-compression", "sources-aws_sqs", "tokio-util/io"]
 sources-aws_sqs = ["aws-core", "dep:aws-sdk-sqs"]
+sources-azure_container= []
 sources-datadog_agent = ["sources-utils-http-error", "protobuf-build"]
 sources-demo_logs = ["dep:fakedata"]
 sources-dnstap = ["sources-utils-net-tcp", "dep:base64", "dep:hickory-proto", "dep:dnsmsg-parser", "protobuf-build"]
