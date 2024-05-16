@@ -1,0 +1,12 @@
+sources:
+  in:
+    type: "azure_container"
+    exec_interval_secs: 2
+
+sinks:
+  out:
+    inputs:
+      - "in"
+    type: "console"
+    encoding:
+      codec: "json"
