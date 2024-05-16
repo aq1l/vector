@@ -118,7 +118,7 @@ impl AzureBlobConfig {
 impl SourceConfig for AzureBlobConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         self.validate().unwrap();
-        let client = azure::build_client(
+        let client = azure::build_container_client(
             self.connection_string
                 .as_ref()
                 .map(|v| v.inner().to_string()),

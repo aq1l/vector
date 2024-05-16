@@ -179,7 +179,7 @@ impl GenerateConfig for AzureBlobSinkConfig {
 #[typetag::serde(name = "azure_blob")]
 impl SinkConfig for AzureBlobSinkConfig {
     async fn build(&self, _cx: SinkContext) -> Result<(VectorSink, Healthcheck)> {
-        let client = azure::build_client(
+        let client = azure::build_container_client(
             self.connection_string
                 .as_ref()
                 .map(|v| v.inner().to_string()),

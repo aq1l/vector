@@ -9,7 +9,7 @@ use azure_storage_blobs::prelude::*;
 /// Builds Azure Storage Container Client.
 ///
 /// To authenticate only **one** of `connection_string` or `storage_account` should be used.
-pub fn build_client(
+pub fn build_container_client(
     connection_string: Option<String>,
     storage_account: Option<String>,
     container_name: String,
