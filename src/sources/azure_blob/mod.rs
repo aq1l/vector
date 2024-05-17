@@ -1,11 +1,14 @@
 use crate::azure;
-use crate::config::{DataType, LogNamespace, SourceConfig, SourceContext, SourceOutput};
+use crate::config::{
+    DataType, LogNamespace, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
+};
 use crate::event::Event;
+use crate::serde::bool_or_struct;
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
 use crate::SourceSender;
-use azure_storage_blobs::prelude::*;
 use futures_util::StreamExt;
+use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -17,7 +20,7 @@ use vector_lib::sensitive_string::SensitiveString;
 use vrl::prelude::Kind;
 use vrl::{owned_value_path, path};
 
-// pub mod queue;
+pub mod queue;
 
 /// Strategies for consuming objects from Azure Storage.
 #[configurable_component]
@@ -28,8 +31,12 @@ enum Strategy {
     /// Consumes objects by processing events sent to an [Azure Storage Queue][azure_storage_queue].
     ///
     /// [azure_storage_queue]: https://learn.microsoft.com/en-us/azure/storage/queues/storage-queues-introduction
-    #[derivative(Default)]
     StorageQueue,
+
+    /// This is a test strategy used only of development and PoC. Should be removed
+    /// once development is done.
+    #[derivative(Default)]
+    Test,
 }
 
 /// WIP
@@ -55,8 +62,9 @@ pub struct AzureBlobConfig {
     #[configurable(metadata(docs::hidden))]
     strategy: Strategy,
 
-    // /// Configuration options for Storage Queue.
-    // queue: Option<queue::Config>,
+    /// Configuration options for Storage Queue.
+    queue: Option<queue::Config>,
+
     /// The Azure Blob Storage Account connection string.
     ///
     /// Authentication with access key is the only supported authentication method.
@@ -99,6 +107,10 @@ pub struct AzureBlobConfig {
     /// The Azure Blob Storage Account container name.
     #[configurable(metadata(docs::examples = "my-logs"))]
     pub(super) container_name: String,
+
+    #[configurable(derived)]
+    #[serde(default, deserialize_with = "bool_or_struct")]
+    acknowledgements: SourceAcknowledgementsConfig,
 }
 
 impl_generate_config_from_default!(AzureBlobConfig);
@@ -111,6 +123,47 @@ impl AzureBlobConfig {
         }
         Ok(())
     }
+
+    async fn create_queue_ingestor(&self) -> crate::Result<queue::Ingestor> {
+        let container_client = azure::build_container_client(
+            self.connection_string
+                .as_ref()
+                .map(|v| v.inner().to_string()),
+            self.storage_account.as_ref().map(|v| v.to_string()),
+            self.container_name.clone(),
+            self.endpoint.clone(),
+        )
+        .expect("Failed builing container client");
+        match self.queue {
+            Some(ref q) => {
+                let queue_client = azure::build_queue_client(
+                    self.connection_string
+                        .as_ref()
+                        .map(|v| v.inner().to_string()),
+                    self.storage_account.as_ref().map(|v| v.to_string()),
+                    q.queue_name.clone(),
+                    self.endpoint.clone(),
+                )
+                .expect("Failed builing queue client");
+                let ingestor = queue::Ingestor::new(
+                    Arc::clone(&container_client),
+                    Arc::clone(&queue_client),
+                    q.clone(),
+                )
+                .await
+                .expect("Failed creating ingestor");
+
+                Ok(ingestor)
+            }
+            None => Err(CreateQueueIngestorError::ConfigMissing {}.into()),
+        }
+    }
+}
+
+#[derive(Debug, Snafu)]
+enum CreateQueueIngestorError {
+    #[snafu(display("Configuration for `queue` required when strategy=queue"))]
+    ConfigMissing,
 }
 
 #[async_trait::async_trait]
@@ -118,24 +171,22 @@ impl AzureBlobConfig {
 impl SourceConfig for AzureBlobConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         self.validate().unwrap();
-        let client = azure::build_container_client(
-            self.connection_string
-                .as_ref()
-                .map(|v| v.inner().to_string()),
-            self.storage_account.as_ref().map(|v| v.to_string()),
-            self.container_name.clone(),
-            self.endpoint.clone(),
-        )?;
         let log_namespace = cx.log_namespace(self.log_namespace);
 
-        Ok(Box::pin(run_scheduled(
-            self.clone(),
-            self.exec_interval_secs,
-            Arc::clone(&client),
-            cx.shutdown,
-            cx.out,
-            log_namespace,
-        )))
+        match self.strategy {
+            Strategy::Test => Ok(Box::pin(run_scheduled(
+                self.clone(),
+                self.exec_interval_secs,
+                cx.shutdown,
+                cx.out,
+                log_namespace,
+            ))),
+            Strategy::StorageQueue => Ok(Box::pin(self.create_queue_ingestor().await?.run(
+                cx,
+                self.acknowledgements,
+                log_namespace,
+            ))),
+        }
     }
 
     fn outputs(&self, global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
@@ -168,7 +219,6 @@ fn default_exec_interval_secs() -> u64 {
 async fn run_scheduled(
     _: AzureBlobConfig,
     exec_interval_secs: u64,
-    client: Arc<ContainerClient>,
     shutdown: ShutdownSignal,
     out: SourceSender,
     log_namespace: LogNamespace,
@@ -176,12 +226,6 @@ async fn run_scheduled(
     debug!("Starting scheduled exec runs.");
     let schedule = Duration::from_secs(exec_interval_secs);
 
-    let blob_client = client.blob_client("foo");
-    let blob_content_result = blob_client.get_content().await;
-    match blob_content_result {
-        Ok(content) => info!("\tBlob content: {:#?}", content),
-        Err(error) => info!("Failed {:#?}", error),
-    };
     let mut counter = 0;
     let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
     while interval.next().await.is_some() {
