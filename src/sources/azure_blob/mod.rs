@@ -7,6 +7,7 @@ use crate::serde::bool_or_struct;
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
 use crate::SourceSender;
+use async_stream::stream;
 use futures_util::StreamExt;
 use snafu::Snafu;
 use std::sync::Arc;
@@ -178,7 +179,7 @@ impl SourceConfig for AzureBlobConfig {
                 self.clone(),
                 self.exec_interval_secs,
                 cx.shutdown,
-                cx.out,
+                cx.out.clone(),
                 log_namespace,
             ))),
             Strategy::StorageQueue => Ok(Box::pin(self.create_queue_ingestor().await?.run(
@@ -197,9 +198,18 @@ impl SourceConfig for AzureBlobConfig {
             .with_source_metadata(
                 Self::NAME,
                 Some(LegacyKey::Overwrite(owned_value_path!(
-                    "some_additional_metadata"
+                    "timestamp"
                 ))),
-                &owned_value_path!("some_additional_metadata"),
+                &owned_value_path!("timestamp"),
+                Kind::bytes(),
+                None,
+            )
+            .with_source_metadata(
+                Self::NAME,
+                Some(LegacyKey::Overwrite(owned_value_path!(
+                    "blob_name"
+                ))),
+                &owned_value_path!("blob_name"),
                 Kind::bytes(),
                 None,
             );
@@ -216,37 +226,64 @@ fn default_exec_interval_secs() -> u64 {
     1
 }
 
+
+struct BlobRow {
+    payload: String,
+    timestamp: String, // TODO: use some proper timestampt type
+    blob_name: String, // instead of repeating the filename for each row, we could have
+    // sth like Stream<Item = (Stream<Item = BlobRow>, filename, any_file_related_data_common_across_all_streamed_rows)>
+}
+
 async fn run_scheduled(
     _: AzureBlobConfig,
     exec_interval_secs: u64,
     shutdown: ShutdownSignal,
-    out: SourceSender,
+    mut out: SourceSender,
     log_namespace: LogNamespace,
 ) -> Result<(), ()> {
     debug!("Starting scheduled exec runs.");
-    let schedule = Duration::from_secs(exec_interval_secs);
 
-    let mut counter = 0;
-    let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
-    while interval.next().await.is_some() {
-        counter += 1;
+    // we could also use a stream of stream, see BlobRow comment
+    let mut kwapik_stream= Box::pin(stream! {
+        let schedule = Duration::from_secs(exec_interval_secs);
+        let mut counter = 0;
+        let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
+        while interval.next().await.is_some() {
+            counter += 1;
+            yield BlobRow {
+                payload: counter.to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                blob_name: "some_blob".to_string(),
+            };
+        }
+    });
 
-        let mut log_event = LogEvent::from_map(
-            btreemap! {
-                "message" => counter.to_string(),
-            },
-            EventMetadata::default().into(),
-        );
-        log_namespace.insert_source_metadata(
-            AzureBlobConfig::NAME,
-            &mut log_event,
-            Some(LegacyKey::Overwrite("some_additional_metadata")),
-            path!("some_additional_metadata"),
-            "some content".to_owned(),
-        );
-        let event = Event::Log(log_event);
+    let output_stream = Box::pin(stream! {
+        while let Some(row) = kwapik_stream.next().await {
+            let mut log_event = LogEvent::from_map(
+                btreemap! {
+                    "message" => row.payload,
+                },
+                EventMetadata::default().into(),
+            );
+            log_namespace.insert_source_metadata(
+                AzureBlobConfig::NAME,
+                &mut log_event,
+                Some(LegacyKey::Overwrite("timestamp")),
+                path!("timestamp"),
+                row.timestamp.to_owned(),
+            );
+            log_namespace.insert_source_metadata(
+                AzureBlobConfig::NAME,
+                &mut log_event,
+                Some(LegacyKey::Overwrite("blob_name")),
+                path!("blob_name"),
+                row.blob_name.to_owned(),
+            );
+            yield Event::Log(log_event);
+        }
+    });
+    out.send_event_stream(output_stream).await.unwrap();
 
-        out.clone().send_event(event).await.unwrap();
-    }
     Ok(())
 }
