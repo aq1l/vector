@@ -1,6 +1,6 @@
 sources:
   in:
-    type: "azure_container"
+    type: "azure_blob"
     exec_interval_secs: 2
 
 sinks:

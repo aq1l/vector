@@ -18,11 +18,11 @@ use crate::SourceSender;
 /// A dummy implementation is used as a starter.
 /// The source will send dummy messages at a fixed interval, incrementing a counter every
 /// exec_interval_secs seconds.
-#[configurable_component(source("azure_container", "Collect logs from Azure Container."))]
+#[configurable_component(source("azure_blob", "Collect logs from Azure Container."))]
 #[derive(Clone, Debug, Derivative)]
 #[derivative(Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct AzureContainerConfig {
+pub struct AzureBlobConfig {
     // TODO : everything
 
     /// The namespace to use for logs. This overrides the global setting.
@@ -35,9 +35,9 @@ pub struct AzureContainerConfig {
     exec_interval_secs: u64,
 }
 
-impl_generate_config_from_default!(AzureContainerConfig);
+impl_generate_config_from_default!(AzureBlobConfig);
 
-impl AzureContainerConfig {
+impl AzureBlobConfig {
     /// Self validation
     pub fn validate(&self) -> crate::Result<()> {
         if self.exec_interval_secs == 0 {
@@ -48,8 +48,8 @@ impl AzureContainerConfig {
 }
 
 #[async_trait::async_trait]
-#[typetag::serde(name = "azure_container")]
-impl SourceConfig for AzureContainerConfig {
+#[typetag::serde(name = "azure_blob")]
+impl SourceConfig for AzureBlobConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         self.validate().unwrap();
         let log_namespace = cx.log_namespace(self.log_namespace);
@@ -87,7 +87,7 @@ impl SourceConfig for AzureContainerConfig {
 fn default_exec_interval_secs() -> u64 { 1 }
 
 async fn run_scheduled(
-    _: AzureContainerConfig,
+    _: AzureBlobConfig,
     exec_interval_secs: u64,
     shutdown: ShutdownSignal,
     out: SourceSender,
@@ -105,7 +105,7 @@ async fn run_scheduled(
             "message" => counter.to_string(),
         }, EventMetadata::default().into());
         log_namespace.insert_source_metadata(
-            AzureContainerConfig::NAME,
+            AzureBlobConfig::NAME,
             &mut log_event,
             Some(LegacyKey::Overwrite("some_additional_metadata")),
             path!("some_additional_metadata"),
