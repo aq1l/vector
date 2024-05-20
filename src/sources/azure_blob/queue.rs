@@ -9,6 +9,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use futures::FutureExt;
 use serde::Deserialize;
+use snafu::Snafu;
 use serde_with::serde_as;
 use std::{num::NonZeroUsize, panic, sync::Arc};
 use tokio::{pin, select};
@@ -38,6 +39,11 @@ pub(super) struct Config {
     #[configurable(metadata(docs::type_unit = "tasks"))]
     #[configurable(metadata(docs::examples = 5))]
     pub(super) client_concurrency: Option<NonZeroUsize>,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Snafu)]
+pub enum ProcessingError {
 }
 
 pub struct State {
@@ -151,6 +157,19 @@ impl IngestorProcess {
         let messages = messages_result.expect("Failed reading messages");
 
         for message in messages.messages {
+            match self.handle_storage_event(message).await {
+                Ok(()) => {
+                    // TODO do telemetry here and below instead of logs.
+                    info!("Handled event!");
+                }
+                Err(err) => {
+                    info!("Failed handling event: {:#?}", err);
+                }
+            }
+        }
+    }
+
+    async fn handle_storage_event(&mut self, message: azure_storage_queues::operations::Message) -> Result<(), ProcessingError> {
             let decoded_bytes = BASE64_STANDARD
                 .decode(&message.message_text)
                 .expect("Failed decoding message");
@@ -163,7 +182,7 @@ impl IngestorProcess {
                     "Ignoring event because of wrong event type: {}",
                     body.event_type
                 );
-                continue;
+                return Ok(());
             }
             // TODO some smarter parsing should be done here
             let parts = body.subject.split("/").collect::<Vec<_>>();
@@ -188,7 +207,7 @@ impl IngestorProcess {
                 .delete()
                 .await
                 .expect("Failed removing messages from queue");
-        }
+            Ok(())
     }
 }
 
