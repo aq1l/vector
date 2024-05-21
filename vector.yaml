@@ -4,7 +4,7 @@ sources:
     exec_interval_secs: 2
     storage_account: "eventspocaccount"
     container_name: "content"
-    strategy: "storagequeue"
+    strategy: "test"
     queue:
       queue_name: "example-astq"
 
