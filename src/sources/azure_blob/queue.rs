@@ -2,7 +2,9 @@ use crate::config::{SourceAcknowledgementsConfig, SourceContext};
 // use crate::internal_events::EventsReceived;
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
+use crate::sources::azure_blob::BlobStream;
 use crate::SourceSender;
+use async_stream::stream;
 use azure_storage_blobs;
 use azure_storage_queues;
 use base64::prelude::BASE64_STANDARD;
@@ -190,6 +192,58 @@ impl IngestorProcess {
                 .expect("Failed removing messages from queue");
         }
     }
+}
+
+pub fn make_kwapik_stream(
+    container_client: Arc<azure_storage_blobs::prelude::ContainerClient>,
+    queue_client: Arc<azure_storage_queues::QueueClient>,
+) -> BlobStream {
+    Box::pin(stream! {
+        loop {
+            let messages_result = queue_client.get_messages().await;
+            let messages = messages_result.expect("Failed reading messages");
+
+            for message in messages.messages {
+                let decoded_bytes = BASE64_STANDARD
+                    .decode(&message.message_text)
+                    .expect("Failed decoding message");
+                let decoded_string = String::from_utf8(decoded_bytes).expect("Failed decoding UTF");
+                let body: AzureStorageEvent =
+                    serde_json::from_str(decoded_string.as_str()).expect("Wrong JSON");
+                // TODO get the event type const from library?
+                if body.event_type != "Microsoft.Storage.BlobCreated" {
+                    info!(
+                        "Ignoring event because of wrong event type: {}",
+                        body.event_type
+                    );
+                    continue;
+                }
+                // TODO some smarter parsing should be done here
+                let parts = body.subject.split("/").collect::<Vec<_>>();
+                let container = parts[4];
+                // TODO here we'd like to check if container matches the container
+                // from config.
+                let blob = parts[6];
+                info!(
+                    "New blob created in container '{}': '{}'",
+                    &container, &blob
+                );
+
+                let blob_client = container_client.blob_client(blob);
+                let blob_content = blob_client
+                    .get_content()
+                    .await
+                    .expect("Failed getting blob content");
+                info!("\tBlob content: {:#?}", blob_content);
+                queue_client
+                    .pop_receipt_client(message)
+                    .delete()
+                    .await
+                    .expect("Failed removing messages from queue");
+                yield blob_content
+            }
+        }
+    })
 }
 
 #[derive(Clone, Debug, Deserialize)]

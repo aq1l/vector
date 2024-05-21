@@ -8,16 +8,12 @@ use crate::serde::{bool_or_struct, default_decoding};
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
 use crate::SourceSender;
-use async_stream::stream;
 use bytes::Bytes;
 use futures::Stream;
 use futures_util::StreamExt;
 use snafu::Snafu;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time;
-use tokio_stream::wrappers::IntervalStream;
 use vector_lib::codecs::decoding::{
     DeserializerConfig, FramingConfig, NewlineDelimitedDecoderOptions,
 };
@@ -25,6 +21,7 @@ use vector_lib::codecs::NewlineDelimitedDecoderConfig;
 use vector_lib::config::LegacyKey;
 use vector_lib::sensitive_string::SensitiveString;
 use vrl::path;
+use crate::sources::azure_blob::queue::make_kwapik_stream;
 
 pub mod queue;
 
@@ -136,15 +133,7 @@ impl AzureBlobConfig {
     }
 
     async fn create_queue_ingestor(&self) -> crate::Result<queue::Ingestor> {
-        let container_client = azure::build_container_client(
-            self.connection_string
-                .as_ref()
-                .map(|v| v.inner().to_string()),
-            self.storage_account.as_ref().map(|v| v.to_string()),
-            self.container_name.clone(),
-            self.endpoint.clone(),
-        )
-        .expect("Failed builing container client");
+        let container_client = self.make_container_client();
         match self.queue {
             Some(ref q) => {
                 let queue_client = azure::build_queue_client(
@@ -169,30 +158,43 @@ impl AzureBlobConfig {
             None => Err(CreateQueueIngestorError::ConfigMissing {}.into()),
         }
     }
+
+    fn make_container_client(&self) -> Arc<azure_storage_blobs::prelude::ContainerClient> {
+        azure::build_container_client(
+            self.connection_string
+                .as_ref()
+                .map(|v| v.inner().to_string()),
+            self.storage_account.as_ref().map(|v| v.to_string()),
+            self.container_name.clone(),
+            self.endpoint.clone(),
+        )
+        .expect("Failed builing container client")
+    }
+
+    fn make_queue_client(&self) -> Arc<azure_storage_queues::QueueClient> {
+        let q = self.queue.clone().unwrap();
+        azure::build_queue_client(
+            self.connection_string
+                .as_ref()
+                .map(|v| v.inner().to_string()),
+            self.storage_account.as_ref().map(|v| v.to_string()),
+            q.queue_name.clone(),
+            self.endpoint.clone(),
+        )
+        .expect("Failed builing queue client")
+    }
 }
 
-type BlobStream = dyn Stream<Item = Vec<u8>> + Send;
+type BlobStream = Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>;
 
 async fn run_scheduled(
     config: AzureBlobConfig,
-    shutdown: ShutdownSignal,
+    _: ShutdownSignal,
     mut out: SourceSender,
     log_namespace: LogNamespace,
+    kwapik_stream: BlobStream,
 ) -> Result<(), ()> {
-    debug!("Starting scheduled exec runs.");
-
-    let exec_interval_secs = config.exec_interval_secs;
-    // let mut kwapik_stream: Pin<Box<BlobStream>> = Box::pin(self.queue_ingestor.make_stream())
-    let kwapik_stream: Pin<Box<BlobStream>> = Box::pin(stream! {
-        let schedule = Duration::from_secs(exec_interval_secs);
-        let mut counter = 0;
-        let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
-        while interval.next().await.is_some() {
-            counter += 1;
-            // yield counter string as Vec<u8>
-            yield counter.to_string().into_bytes();
-        }
-    });
+    debug!("Starting test kwapik stream run.");
 
     let framing = FramingConfig::NewlineDelimited(NewlineDelimitedDecoderConfig {
         newline_delimited: NewlineDelimitedDecoderOptions { max_length: None },
@@ -240,12 +242,18 @@ impl SourceConfig for AzureBlobConfig {
         let log_namespace = cx.log_namespace(self.log_namespace);
         let self_clone = self.clone();
         match self.strategy {
-            Strategy::Test => Ok(Box::pin(run_scheduled(
-                self_clone,
-                cx.shutdown,
-                cx.out.clone(),
-                log_namespace,
-            ))),
+            Strategy::Test => {
+                let queue_client = self.make_queue_client();
+                let container_client = self.make_container_client();
+                let kwapik_stream = make_kwapik_stream(container_client,queue_client);
+                Ok(Box::pin(run_scheduled(
+                    self_clone,
+                    cx.shutdown,
+                    cx.out.clone(),
+                    log_namespace,
+                    kwapik_stream,
+                )))
+            },
             Strategy::StorageQueue => Ok(Box::pin(self.create_queue_ingestor().await?.run(
                 cx,
                 self.acknowledgements,
