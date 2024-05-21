@@ -1,25 +1,30 @@
 use crate::azure;
+use crate::codecs::DecodingConfig;
 use crate::config::{
-    DataType, LogNamespace, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
+    LogNamespace, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
 };
 use crate::event::Event;
-use crate::serde::bool_or_struct;
+use crate::serde::{bool_or_struct, default_decoding};
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
 use crate::SourceSender;
 use async_stream::stream;
+use bytes::Bytes;
+use futures::Stream;
 use futures_util::StreamExt;
 use snafu::Snafu;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
-use vector_lib::codecs::SyslogDeserializerConfig;
+use vector_lib::codecs::decoding::{
+    DeserializerConfig, FramingConfig, NewlineDelimitedDecoderOptions,
+};
+use vector_lib::codecs::NewlineDelimitedDecoderConfig;
 use vector_lib::config::LegacyKey;
-use vector_lib::event::{EventMetadata, LogEvent};
 use vector_lib::sensitive_string::SensitiveString;
-use vrl::prelude::Kind;
-use vrl::{owned_value_path, path};
+use vrl::path;
 
 pub mod queue;
 
@@ -112,6 +117,11 @@ pub struct AzureBlobConfig {
     #[configurable(derived)]
     #[serde(default, deserialize_with = "bool_or_struct")]
     acknowledgements: SourceAcknowledgementsConfig,
+
+    #[configurable(derived)]
+    #[serde(default = "default_decoding")]
+    #[derivative(Default(value = "default_decoding()"))]
+    pub decoding: DeserializerConfig,
 }
 
 impl_generate_config_from_default!(AzureBlobConfig);
@@ -161,6 +171,61 @@ impl AzureBlobConfig {
     }
 }
 
+type BlobStream = dyn Stream<Item = Vec<u8>> + Send;
+
+async fn run_scheduled(
+    config: AzureBlobConfig,
+    shutdown: ShutdownSignal,
+    mut out: SourceSender,
+    log_namespace: LogNamespace,
+) -> Result<(), ()> {
+    debug!("Starting scheduled exec runs.");
+
+    let exec_interval_secs = config.exec_interval_secs;
+    // let mut kwapik_stream: Pin<Box<BlobStream>> = Box::pin(self.queue_ingestor.make_stream())
+    let kwapik_stream: Pin<Box<BlobStream>> = Box::pin(stream! {
+        let schedule = Duration::from_secs(exec_interval_secs);
+        let mut counter = 0;
+        let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
+        while interval.next().await.is_some() {
+            counter += 1;
+            // yield counter string as Vec<u8>
+            yield counter.to_string().into_bytes();
+        }
+    });
+
+    let framing = FramingConfig::NewlineDelimited(NewlineDelimitedDecoderConfig {
+        newline_delimited: NewlineDelimitedDecoderOptions { max_length: None },
+    });
+    // TODO: tidy decoder ownership
+    let decoder = DecodingConfig::new(framing, config.decoding.clone(), log_namespace)
+        .build()
+        .unwrap();
+
+    let mut output_stream = kwapik_stream.flat_map(|row: Vec<u8>| {
+        // convert row to bytes::Bytes
+
+        let (events, _) = decoder.deserializer_parse(Bytes::from(row)).unwrap();
+        let events = events.into_iter().map(|mut event| match event {
+            Event::Log(ref mut log_event) => {
+                log_namespace.insert_source_metadata(
+                    AzureBlobConfig::NAME,
+                    log_event,
+                    Some(LegacyKey::Overwrite("ingest_timestamp")),
+                    path!("ingest_timestamp"),
+                    chrono::Utc::now().to_rfc3339(),
+                );
+                event
+            }
+            _ => panic!("TODO: this should never happen, handle this gracefully"),
+        });
+        futures::stream::iter(events)
+    });
+    out.send_event_stream(&mut output_stream).await.unwrap();
+
+    Ok(())
+}
+
 #[derive(Debug, Snafu)]
 enum CreateQueueIngestorError {
     #[snafu(display("Configuration for `queue` required when strategy=queue"))]
@@ -173,11 +238,10 @@ impl SourceConfig for AzureBlobConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         self.validate().unwrap();
         let log_namespace = cx.log_namespace(self.log_namespace);
-
+        let self_clone = self.clone();
         match self.strategy {
             Strategy::Test => Ok(Box::pin(run_scheduled(
-                self.clone(),
-                self.exec_interval_secs,
+                self_clone,
                 cx.shutdown,
                 cx.out.clone(),
                 log_namespace,
@@ -192,29 +256,15 @@ impl SourceConfig for AzureBlobConfig {
 
     fn outputs(&self, global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
         let log_namespace = global_log_namespace.merge(self.log_namespace);
-        let schema_definition = SyslogDeserializerConfig::from_source(Self::NAME)
+        let schema_definition = self
+            .decoding
             .schema_definition(log_namespace)
-            .with_standard_vector_source_metadata()
-            .with_source_metadata(
-                Self::NAME,
-                Some(LegacyKey::Overwrite(owned_value_path!(
-                    "timestamp"
-                ))),
-                &owned_value_path!("timestamp"),
-                Kind::bytes(),
-                None,
-            )
-            .with_source_metadata(
-                Self::NAME,
-                Some(LegacyKey::Overwrite(owned_value_path!(
-                    "blob_name"
-                ))),
-                &owned_value_path!("blob_name"),
-                Kind::bytes(),
-                None,
-            );
+            .with_standard_vector_source_metadata();
 
-        vec![SourceOutput::new_logs(DataType::Log, schema_definition)]
+        vec![SourceOutput::new_logs(
+            self.decoding.output_type(),
+            schema_definition,
+        )]
     }
 
     fn can_acknowledge(&self) -> bool {
@@ -224,66 +274,4 @@ impl SourceConfig for AzureBlobConfig {
 
 fn default_exec_interval_secs() -> u64 {
     1
-}
-
-
-struct BlobRow {
-    payload: String,
-    timestamp: String, // TODO: use some proper timestampt type
-    blob_name: String, // instead of repeating the filename for each row, we could have
-    // sth like Stream<Item = (Stream<Item = BlobRow>, filename, any_file_related_data_common_across_all_streamed_rows)>
-}
-
-async fn run_scheduled(
-    _: AzureBlobConfig,
-    exec_interval_secs: u64,
-    shutdown: ShutdownSignal,
-    mut out: SourceSender,
-    log_namespace: LogNamespace,
-) -> Result<(), ()> {
-    debug!("Starting scheduled exec runs.");
-
-    // we could also use a stream of stream, see BlobRow comment
-    let mut kwapik_stream= Box::pin(stream! {
-        let schedule = Duration::from_secs(exec_interval_secs);
-        let mut counter = 0;
-        let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
-        while interval.next().await.is_some() {
-            counter += 1;
-            yield BlobRow {
-                payload: counter.to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                blob_name: "some_blob".to_string(),
-            };
-        }
-    });
-
-    let output_stream = Box::pin(stream! {
-        while let Some(row) = kwapik_stream.next().await {
-            let mut log_event = LogEvent::from_map(
-                btreemap! {
-                    "message" => row.payload,
-                },
-                EventMetadata::default().into(),
-            );
-            log_namespace.insert_source_metadata(
-                AzureBlobConfig::NAME,
-                &mut log_event,
-                Some(LegacyKey::Overwrite("timestamp")),
-                path!("timestamp"),
-                row.timestamp.to_owned(),
-            );
-            log_namespace.insert_source_metadata(
-                AzureBlobConfig::NAME,
-                &mut log_event,
-                Some(LegacyKey::Overwrite("blob_name")),
-                path!("blob_name"),
-                row.blob_name.to_owned(),
-            );
-            yield Event::Log(log_event);
-        }
-    });
-    out.send_event_stream(output_stream).await.unwrap();
-
-    Ok(())
 }
