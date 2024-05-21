@@ -7,11 +7,11 @@ use azure_storage_blobs;
 use azure_storage_queues;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use futures::FutureExt;
+use futures::{FutureExt, stream::StreamExt};
 use serde::Deserialize;
 use snafu::Snafu;
 use serde_with::serde_as;
-use std::{num::NonZeroUsize, panic, sync::Arc};
+use std::{num::NonZeroUsize, panic, sync::Arc, io::{BufRead, BufReader, Cursor}};
 use tokio::{pin, select};
 use tracing::Instrument;
 use vector_lib::config::LogNamespace;
@@ -196,11 +196,22 @@ impl IngestorProcess {
             );
 
             let blob_client = self.state.container_client.blob_client(blob);
-            let blob_content = blob_client
-                .get_content()
-                .await
-                .expect("Failed getting blob content");
-            info!("\tBlob content: {:#?}", blob_content);
+
+            let mut result: Vec<u8> = vec![];
+            let mut stream = blob_client.get().into_stream();
+            while let Some(value) = stream.next().await {
+                let mut body = value.unwrap().data;
+                while let Some(value) = body.next().await {
+                    let value = value.expect("ASDASD");
+                    result.extend(&value);
+                }
+            }
+            let reader = Cursor::new(result);
+            let buffered = BufReader::new(reader);
+
+            for line in buffered.lines() {
+                info!("\tBlob line: {:#?}", line);
+            }
             self.state
                 .queue_client
                 .pop_receipt_client(message)
