@@ -171,7 +171,7 @@ impl AzureBlobConfig {
     }
 }
 
-type BlobStream = dyn Stream<Item = Vec<u8>> + Send;
+type BlobStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, std::io::Error>> + Send>>;
 
 async fn run_scheduled(
     config: AzureBlobConfig,
@@ -183,14 +183,14 @@ async fn run_scheduled(
 
     let exec_interval_secs = config.exec_interval_secs;
     // let mut kwapik_stream: Pin<Box<BlobStream>> = Box::pin(self.queue_ingestor.make_stream())
-    let kwapik_stream: Pin<Box<BlobStream>> = Box::pin(stream! {
+    let kwapik_stream: BlobStream = Box::pin(stream! {
         let schedule = Duration::from_secs(exec_interval_secs);
         let mut counter = 0;
         let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown.clone());
         while interval.next().await.is_some() {
             counter += 1;
             // yield counter string as Vec<u8>
-            yield counter.to_string().into_bytes();
+            yield Ok(counter.to_string().into_bytes());
         }
     });
 

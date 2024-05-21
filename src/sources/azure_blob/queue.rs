@@ -1,18 +1,28 @@
+use async_stream::stream;
 use crate::config::{SourceAcknowledgementsConfig, SourceContext};
 // use crate::internal_events::EventsReceived;
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
+use crate::sources::azure_blob::BlobStream;
 use crate::SourceSender;
 use azure_storage_blobs;
 use azure_storage_queues;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use futures::{FutureExt, stream::StreamExt};
+use futures::{stream::StreamExt, FutureExt};
 use serde::Deserialize;
-use snafu::Snafu;
 use serde_with::serde_as;
-use std::{num::NonZeroUsize, panic, sync::Arc, io::{BufRead, BufReader, Cursor}};
-use tokio::{pin, select};
+use snafu::Snafu;
+use std::{
+    io::{Cursor, BufRead, BufReader},
+    num::NonZeroUsize,
+    panic,
+    sync::Arc,
+};
+use tokio::{
+    pin,
+    select,
+};
 use tracing::Instrument;
 use vector_lib::config::LogNamespace;
 // use vector_lib::internal_event::{BytesReceived, Protocol, Registered};
@@ -44,6 +54,8 @@ pub(super) struct Config {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Snafu)]
 pub enum ProcessingError {
+    NoValidMessage,
+    WrongEventType,
 }
 
 pub struct State {
@@ -151,74 +163,84 @@ impl IngestorProcess {
         }
     }
 
-    async fn run_once(&mut self) {
+    async fn run_once(&mut self) -> Result<BlobStream, ProcessingError> {
         // TODO this is a PoC. Need better error handling
         let messages_result = self.state.queue_client.get_messages().await;
         let messages = messages_result.expect("Failed reading messages");
 
         for message in messages.messages {
             match self.handle_storage_event(message).await {
-                Ok(()) => {
+                Ok(stream) => {
                     // TODO do telemetry here and below instead of logs.
                     info!("Handled event!");
+                    return Ok(stream); // Return the stream here
                 }
                 Err(err) => {
                     info!("Failed handling event: {:#?}", err);
                 }
             }
         }
+        Err(ProcessingError::NoValidMessage) // Or some other appropriate error
     }
 
-    async fn handle_storage_event(&mut self, message: azure_storage_queues::operations::Message) -> Result<(), ProcessingError> {
-            let decoded_bytes = BASE64_STANDARD
-                .decode(&message.message_text)
-                .expect("Failed decoding message");
-            let decoded_string = String::from_utf8(decoded_bytes).expect("Failed decoding UTF");
-            let body: AzureStorageEvent =
-                serde_json::from_str(decoded_string.as_str()).expect("Wrong JSON");
-            // TODO get the event type const from library?
-            if body.event_type != "Microsoft.Storage.BlobCreated" {
-                info!(
-                    "Ignoring event because of wrong event type: {}",
-                    body.event_type
-                );
-                return Ok(());
-            }
-            // TODO some smarter parsing should be done here
-            let parts = body.subject.split("/").collect::<Vec<_>>();
-            let container = parts[4];
-            // TODO here we'd like to check if container matches the container
-            // from config.
-            let blob = parts[6];
+    async fn handle_storage_event(
+        &mut self,
+        message: azure_storage_queues::operations::Message,
+    ) -> Result<BlobStream, ProcessingError> {
+        let decoded_bytes = BASE64_STANDARD
+            .decode(&message.message_text)
+            .expect("Failed decoding message");
+        let decoded_string = String::from_utf8(decoded_bytes).expect("Failed decoding UTF");
+        let body: AzureStorageEvent = serde_json::from_str(&decoded_string).expect("Wrong JSON");
+
+        // TODO get the event type const from library?
+        if body.event_type != "Microsoft.Storage.BlobCreated" {
             info!(
-                "New blob created in container '{}': '{}'",
-                &container, &blob
+                "Ignoring event because of wrong event type: {}",
+                body.event_type
             );
+            return Err(ProcessingError::WrongEventType);
+        }
 
-            let blob_client = self.state.container_client.blob_client(blob);
+        // TODO some smarter parsing should be done here
+        let parts = body.subject.split('/').collect::<Vec<_>>();
+        let container = parts[4];
+        // TODO here we'd like to check if container matches the container from config.
+        let blob = parts[6];
+        info!(
+            "New blob created in container '{}': '{}'",
+            &container, &blob
+        );
 
-            let mut result: Vec<u8> = vec![];
-            let mut stream = blob_client.get().into_stream();
-            while let Some(value) = stream.next().await {
-                let mut body = value.unwrap().data;
-                while let Some(value) = body.next().await {
-                    let value = value.expect("ASDASD");
-                    result.extend(&value);
-                }
+        let blob_client = self.state.container_client.blob_client(blob);
+
+        let mut result: Vec<u8> = vec![];
+        let mut stream = blob_client.get().into_stream();
+        while let Some(value) = stream.next().await {
+            let mut body = value.unwrap().data;
+            while let Some(value) = body.next().await {
+                let value = value.expect("Failed to read body chunk");
+                result.extend(&value);
             }
-            let reader = Cursor::new(result);
-            let buffered = BufReader::new(reader);
+        }
 
+        let reader = Cursor::new(result);
+        let buffered = BufReader::new(reader);
+        let line_stream = stream!{
             for line in buffered.lines() {
-                info!("\tBlob line: {:#?}", line);
+                yield line.expect("TODO").as_bytes().to_vec()
             }
-            self.state
-                .queue_client
-                .pop_receipt_client(message)
-                .delete()
-                .await
-                .expect("Failed removing messages from queue");
-            Ok(())
+        };
+        let boxed_stream: BlobStream = Box::pin(line_stream);
+
+        self.state
+            .queue_client
+            .pop_receipt_client(message)
+            .delete()
+            .await
+            .expect("Failed removing messages from queue");
+
+        Ok(boxed_stream)
     }
 }
 
