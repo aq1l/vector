@@ -9,10 +9,15 @@ use azure_storage_blobs;
 use azure_storage_queues;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use futures::FutureExt;
+use futures::{stream::StreamExt, FutureExt};
 use serde::Deserialize;
 use serde_with::serde_as;
-use std::{num::NonZeroUsize, panic, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    panic,
+    sync::Arc,
+    io::{BufRead, BufReader, Cursor},
+};
 use tokio::{pin, select};
 use tracing::Instrument;
 use vector_lib::config::LogNamespace;
@@ -230,17 +235,27 @@ pub fn make_kwapik_stream(
                 );
 
                 let blob_client = container_client.blob_client(blob);
-                let blob_content = blob_client
-                    .get_content()
-                    .await
-                    .expect("Failed getting blob content");
-                info!("\tBlob content: {:#?}", blob_content);
+                let mut result: Vec<u8> = vec![];
+                let mut stream = blob_client.get().into_stream();
+                while let Some(value) = stream.next().await {
+                    let mut body = value.unwrap().data;
+                    while let Some(value) = body.next().await {
+                        let value = value.expect("Failed to read body chunk");
+                        result.extend(&value);
+                    }
+                }
+
+                let reader = Cursor::new(result);
+                let buffered = BufReader::new(reader);
                 queue_client
                     .pop_receipt_client(message)
                     .delete()
                     .await
                     .expect("Failed removing messages from queue");
-                yield blob_content
+                for line in buffered.lines() {
+                    let line = line.map(|line| line.as_bytes().to_vec());
+                    yield line.expect("ASDF");
+                }
             }
         }
     })
