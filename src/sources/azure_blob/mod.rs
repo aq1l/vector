@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use async_stream::stream;
 use bytes::Bytes;
+use futures::stream::StreamExt;
 use futures::Stream;
-use futures_util::StreamExt;
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
 use vrl::path;
@@ -160,7 +160,7 @@ async fn run_streaming(
     _: ShutdownSignal,
     mut out: SourceSender,
     log_namespace: LogNamespace,
-    row_stream: BlobStream,
+    mut row_stream: BlobStream,
 ) -> Result<(), ()> {
     debug!("Starting Azure streaming.");
 
@@ -175,28 +175,32 @@ async fn run_streaming(
         })?;
 
     // TODO: use filter_map to handle errors
-    let mut output_stream = row_stream.flat_map(|row: Vec<u8>| {
-        // convert row to bytes::Bytes
-
-        let (events, _) = decoder.deserializer_parse(Bytes::from(row)).unwrap();
-        let events = events.into_iter().map(|mut event| match event {
-            Event::Log(ref mut log_event) => {
-                log_namespace.insert_source_metadata(
-                    AzureBlobConfig::NAME,
-                    log_event,
-                    Some(LegacyKey::Overwrite("ingest_timestamp")),
-                    path!("ingest_timestamp"),
-                    chrono::Utc::now().to_rfc3339(),
-                );
-                event
+    let mut output_stream = stream! {
+        while let Some(row) = row_stream.next().await {
+            let deser_result = decoder.deserializer_parse(Bytes::from(row));
+            if deser_result.is_err(){
+                continue;
             }
-            _ => {
-                panic!("Expected Azure rows as Log Events, but got {:?}.", event);
-                // return None;
+            let (events, _) = deser_result.unwrap();
+            for mut event in events.into_iter(){
+                match event {
+                    Event::Log(ref mut log_event) => {
+                        log_namespace.insert_source_metadata(
+                            AzureBlobConfig::NAME,
+                            log_event,
+                            Some(LegacyKey::Overwrite("ingest_timestamp")),
+                            path!("ingest_timestamp"),
+                            chrono::Utc::now().to_rfc3339(),
+                        );
+                        yield event
+                    }
+                    _ => {
+                        error!("Expected Azure rows as Log Events, but got {:?}.", event);
+                    }
+                }
             }
-        });
-        futures::stream::iter(events)
-    });
+        }
+    }.boxed();
     out.send_event_stream(&mut output_stream)
         .await
         .map_err(|e| {
@@ -220,7 +224,7 @@ impl SourceConfig for AzureBlobConfig {
                 // streaming incremented numbers periodically
                 let exec_interval_secs = self.exec_interval_secs;
                 let shutdown = cx.shutdown.clone();
-                Box::pin(stream! {
+                stream! {
                     let schedule = Duration::from_secs(exec_interval_secs);
                     let mut counter = 0;
                     let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown);
@@ -229,7 +233,7 @@ impl SourceConfig for AzureBlobConfig {
                         // yield counter string as Vec<u8>
                         yield counter.to_string().into_bytes();
                     }
-                })
+                }.boxed()
             }
             Strategy::StorageQueue => make_azure_row_stream(self)?,
         };
