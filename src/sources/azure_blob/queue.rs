@@ -30,11 +30,11 @@ pub(super) struct Config {
 
 pub fn make_azure_row_stream(
     cfg: &AzureBlobConfig
-) -> BlobStream {
-    let queue_client = make_queue_client(cfg);
-    let container_client = make_container_client(cfg);
+) -> crate::Result<BlobStream> {
+    let queue_client = make_queue_client(cfg)?;
+    let container_client = make_container_client(cfg)?;
 
-    Box::pin(stream! {
+    Ok(Box::pin(stream! {
         // TODO: add a way to stop this loop, possibly with shutdown
         loop {
             let messages_result = queue_client.get_messages().await;
@@ -90,11 +90,11 @@ pub fn make_azure_row_stream(
                 }
             }
         }
-    })
+    }))
 }
 
-fn make_queue_client(cfg: &AzureBlobConfig) -> Arc<azure_storage_queues::QueueClient> {
-    let q = cfg.queue.clone().unwrap();
+fn make_queue_client(cfg: &AzureBlobConfig) -> crate::Result<Arc<azure_storage_queues::QueueClient>> {
+    let q = cfg.queue.clone().ok_or("Missing queue.")?;
     azure::build_queue_client(
         cfg.connection_string
             .as_ref()
@@ -103,10 +103,9 @@ fn make_queue_client(cfg: &AzureBlobConfig) -> Arc<azure_storage_queues::QueueCl
         q.queue_name.clone(),
         cfg.endpoint.clone(),
     )
-        .expect("Failed builing queue client")
 }
 
-fn make_container_client(cfg: &AzureBlobConfig) -> Arc<azure_storage_blobs::prelude::ContainerClient> {
+fn make_container_client(cfg: &AzureBlobConfig) -> crate::Result<Arc<azure_storage_blobs::prelude::ContainerClient>> {
     azure::build_container_client(
         cfg.connection_string
             .as_ref()
@@ -115,7 +114,6 @@ fn make_container_client(cfg: &AzureBlobConfig) -> Arc<azure_storage_blobs::prel
         cfg.container_name.clone(),
         cfg.endpoint.clone(),
     )
-        .expect("Failed builing container client")
 }
 
 #[derive(Clone, Debug, Deserialize)]

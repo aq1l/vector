@@ -5,7 +5,6 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::Stream;
 use futures_util::StreamExt;
-use snafu::Snafu;
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
 use vrl::path;
@@ -131,13 +130,27 @@ impl_generate_config_from_default!(AzureBlobConfig);
 impl AzureBlobConfig {
     /// Self validation
     pub fn validate(&self) -> crate::Result<()> {
-        if self.exec_interval_secs == 0 {
-            return Err("exec_interval_secs must be greater than 0".into());
+        match self.strategy {
+            Strategy::StorageQueue => {
+                if self.queue.is_none() || self.queue.as_ref().unwrap().queue_name.is_empty() {
+                    return Err("Azure event grid queue must be set.".into());
+                }
+                if self.storage_account.clone().unwrap_or_default().is_empty() {
+                    return Err("Azure Storage Account must be set.".into());
+                }
+                if self.container_name.is_empty() {
+                    return Err("Azure Container must be set.".into());
+                }
+            }
+            Strategy::Test => {
+                if self.exec_interval_secs == 0 {
+                    return Err("exec_interval_secs must be greater than 0".into());
+                }
+            }
         }
+
         Ok(())
     }
-
-
 }
 
 type BlobStream = Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>;
@@ -147,19 +160,22 @@ async fn run_streaming(
     _: ShutdownSignal,
     mut out: SourceSender,
     log_namespace: LogNamespace,
-    kwapik_stream: BlobStream,
+    row_stream: BlobStream,
 ) -> Result<(), ()> {
-    debug!("Starting test kwapik stream run.");
+    debug!("Starting Azure streaming.");
 
     let framing = FramingConfig::NewlineDelimited(NewlineDelimitedDecoderConfig {
         newline_delimited: NewlineDelimitedDecoderOptions { max_length: None },
     });
-    // TODO: tidy decoder ownership
     let decoder = DecodingConfig::new(framing, config.decoding.clone(), log_namespace)
         .build()
-        .unwrap();
+        .map_err(|e| {
+            error!("Failed to build decoder: {}", e);
+            ()
+        })?;
 
-    let mut output_stream = kwapik_stream.flat_map(|row: Vec<u8>| {
+    // TODO: use filter_map to handle errors
+    let mut output_stream = row_stream.flat_map(|row: Vec<u8>| {
         // convert row to bytes::Bytes
 
         let (events, _) = decoder.deserializer_parse(Bytes::from(row)).unwrap();
@@ -174,26 +190,28 @@ async fn run_streaming(
                 );
                 event
             }
-            _ => panic!("TODO: this should never happen, handle this gracefully"),
+            _ => {
+                panic!("Expected Azure rows as Log Events, but got {:?}.", event);
+                // return None;
+            }
         });
         futures::stream::iter(events)
     });
-    out.send_event_stream(&mut output_stream).await.unwrap();
+    out.send_event_stream(&mut output_stream)
+        .await
+        .map_err(|e| {
+            error!("Failed to build decoder: {}", e);
+            ()
+        })?;
 
     Ok(())
-}
-
-#[derive(Debug, Snafu)]
-enum CreateQueueIngestorError {
-    #[snafu(display("Configuration for `queue` required when strategy=queue"))]
-    ConfigMissing,
 }
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "azure_blob")]
 impl SourceConfig for AzureBlobConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
-        self.validate().unwrap();
+        self.validate()?;
         let log_namespace = cx.log_namespace(self.log_namespace);
         let self_clone = self.clone();
 
@@ -213,7 +231,7 @@ impl SourceConfig for AzureBlobConfig {
                     }
                 })
             }
-            Strategy::StorageQueue => make_azure_row_stream(self)
+            Strategy::StorageQueue => make_azure_row_stream(self)?,
         };
         Ok(Box::pin(run_streaming(
             self_clone,
