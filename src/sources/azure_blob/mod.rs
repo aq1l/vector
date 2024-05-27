@@ -3,9 +3,8 @@ use std::time::Duration;
 
 use async_stream::stream;
 use bytes::Bytes;
-use futures::stream::StreamExt;
-use futures::Stream;
-use tokio::time;
+use futures::{stream::StreamExt, Stream};
+use tokio::{select, time};
 use tokio_stream::wrappers::IntervalStream;
 use vrl::path;
 
@@ -24,7 +23,7 @@ use crate::event::Event;
 use crate::serde::{bool_or_struct, default_decoding};
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
-use crate::sources::azure_blob::queue::make_azure_row_stream;
+// use crate::sources::azure_blob::queue::make_azure_row_stream;
 use crate::SourceSender;
 
 pub mod queue;
@@ -155,58 +154,84 @@ impl AzureBlobConfig {
 
 type BlobStream = Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>;
 
+struct BlobPack {
+    row_stream: BlobStream,
+    // success_handler: Box<dyn FnMut() -> () + Send>,
+}
+type BlobPackStream = Pin<Box<dyn Stream<Item = BlobPack> + Send>>;
+
 async fn run_streaming(
     config: AzureBlobConfig,
-    _: ShutdownSignal,
+    shutdown: ShutdownSignal,
     mut out: SourceSender,
     log_namespace: LogNamespace,
-    mut row_stream: BlobStream,
+    mut blob_stream: BlobPackStream,
 ) -> Result<(), ()> {
     debug!("Starting Azure streaming.");
 
     let framing = FramingConfig::NewlineDelimited(NewlineDelimitedDecoderConfig {
         newline_delimited: NewlineDelimitedDecoderOptions { max_length: None },
     });
-    let decoder = DecodingConfig::new(framing, config.decoding.clone(), log_namespace)
+    let decoder_base = DecodingConfig::new(framing, config.decoding.clone(), log_namespace)
         .build()
         .map_err(|e| {
             error!("Failed to build decoder: {}", e);
             ()
         })?;
 
-    // TODO: use filter_map to handle errors
-    let mut output_stream = stream! {
-        while let Some(row) = row_stream.next().await {
-            let deser_result = decoder.deserializer_parse(Bytes::from(row));
-            if deser_result.is_err(){
-                continue;
-            }
-            let (events, _) = deser_result.unwrap();
-            for mut event in events.into_iter(){
-                match event {
-                    Event::Log(ref mut log_event) => {
-                        log_namespace.insert_source_metadata(
-                            AzureBlobConfig::NAME,
-                            log_event,
-                            Some(LegacyKey::Overwrite("ingest_timestamp")),
-                            path!("ingest_timestamp"),
-                            chrono::Utc::now().to_rfc3339(),
-                        );
-                        yield event
+    loop {
+        let decoder = decoder_base.clone();
+        select! {
+            blob_pack = blob_stream.next() => {
+                match blob_pack{
+                    Some(blob_pack) => {
+                        let mut row_stream = blob_pack.row_stream;
+                        // process_blob_stream(row_stream, &mut out, &log_namespace, &decoder).await?;
+                        let mut output_stream = stream! {
+                            // TODO: consider selecting with a shutdown
+                            while let Some(row) = row_stream.next().await {
+                                let deser_result = decoder.deserializer_parse(Bytes::from(row));
+                                if deser_result.is_err(){
+                                    continue;
+                                }
+                                let (events, _) = deser_result.unwrap();
+                                for mut event in events.into_iter(){
+                                    match event {
+                                        Event::Log(ref mut log_event) => {
+                                            log_namespace.insert_source_metadata(
+                                                AzureBlobConfig::NAME,
+                                                log_event,
+                                                Some(LegacyKey::Overwrite("ingest_timestamp")),
+                                                path!("ingest_timestamp"),
+                                                chrono::Utc::now().to_rfc3339(),
+                                            );
+                                            yield event
+                                        }
+                                        _ => {
+                                            error!("Expected Azure rows as Log Events, but got {:?}.", event);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .boxed();
+                        out.send_event_stream(&mut output_stream)
+                            .await
+                            .map_err(|e| {
+                                error!("Failed to build decoder: {}", e);
+                                ()
+                            })?;
                     }
-                    _ => {
-                        error!("Expected Azure rows as Log Events, but got {:?}.", event);
+                    None => {
+                        break;
                     }
                 }
+            },
+            _ = shutdown.clone() => {
+                break;
             }
         }
-    }.boxed();
-    out.send_event_stream(&mut output_stream)
-        .await
-        .map_err(|e| {
-            error!("Failed to build decoder: {}", e);
-            ()
-        })?;
+    }
 
     Ok(())
 }
@@ -219,30 +244,35 @@ impl SourceConfig for AzureBlobConfig {
         let log_namespace = cx.log_namespace(self.log_namespace);
         let self_clone = self.clone();
 
-        let row_stream = match self.strategy {
+        let blob_pack_stream: BlobPackStream = match self.strategy {
             Strategy::Test => {
                 // streaming incremented numbers periodically
                 let exec_interval_secs = self.exec_interval_secs;
                 let shutdown = cx.shutdown.clone();
                 stream! {
-                    let schedule = Duration::from_secs(exec_interval_secs);
-                    let mut counter = 0;
-                    let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown);
-                    while interval.next().await.is_some() {
-                        counter += 1;
-                        // yield counter string as Vec<u8>
-                        yield counter.to_string().into_bytes();
+                    yield BlobPack{
+                        row_stream: stream! {
+                            let schedule = Duration::from_secs(exec_interval_secs);
+                            let mut counter = 0;
+                            let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown);
+                            while interval.next().await.is_some() {
+                                counter += 1;
+                                // yield counter string as Vec<u8>
+                                yield counter.to_string().into_bytes();
+                            }
+                        }.boxed()
                     }
                 }.boxed()
             }
-            Strategy::StorageQueue => make_azure_row_stream(self)?,
+            // Strategy::StorageQueue => make_azure_row_stream(self)?,
+            Strategy::StorageQueue => panic!("Not implemented yet"),
         };
         Ok(Box::pin(run_streaming(
             self_clone,
             cx.shutdown,
             cx.out.clone(),
             log_namespace,
-            row_stream,
+            blob_pack_stream,
         )))
     }
 
