@@ -1,7 +1,7 @@
 sources:
   in:
     type: "azure_blob"
-    exec_interval_secs: 2
+    exec_interval_secs: 1
     storage_account: "eventspocaccount"
     container_name: "content"
     strategy: "test"

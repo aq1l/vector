@@ -15,7 +15,7 @@ use vector_lib::codecs::NewlineDelimitedDecoderConfig;
 use vector_lib::config::LegacyKey;
 use vector_lib::sensitive_string::SensitiveString;
 
-use crate::codecs::DecodingConfig;
+use crate::codecs::{Decoder, DecodingConfig};
 use crate::config::{
     LogNamespace, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
 };
@@ -180,50 +180,14 @@ async fn run_streaming(
         })?;
 
     loop {
-        let decoder = decoder_base.clone();
         select! {
             blob_pack = blob_stream.next() => {
                 match blob_pack{
                     Some(blob_pack) => {
-                        let mut row_stream = blob_pack.row_stream;
-                        // process_blob_stream(row_stream, &mut out, &log_namespace, &decoder).await?;
-                        let mut output_stream = stream! {
-                            // TODO: consider selecting with a shutdown
-                            while let Some(row) = row_stream.next().await {
-                                let deser_result = decoder.deserializer_parse(Bytes::from(row));
-                                if deser_result.is_err(){
-                                    continue;
-                                }
-                                let (events, _) = deser_result.unwrap();
-                                for mut event in events.into_iter(){
-                                    match event {
-                                        Event::Log(ref mut log_event) => {
-                                            log_namespace.insert_source_metadata(
-                                                AzureBlobConfig::NAME,
-                                                log_event,
-                                                Some(LegacyKey::Overwrite("ingest_timestamp")),
-                                                path!("ingest_timestamp"),
-                                                chrono::Utc::now().to_rfc3339(),
-                                            );
-                                            yield event
-                                        }
-                                        _ => {
-                                            error!("Expected Azure rows as Log Events, but got {:?}.", event);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .boxed();
-                        out.send_event_stream(&mut output_stream)
-                            .await
-                            .map_err(|e| {
-                                error!("Failed to build decoder: {}", e);
-                                ()
-                            })?;
+                        process_blob_pack(blob_pack, &mut out, &log_namespace, decoder_base.clone()).await?;
                     }
                     None => {
-                        break;
+                        break; // end of stream
                     }
                 }
             },
@@ -233,6 +197,49 @@ async fn run_streaming(
         }
     }
 
+    Ok(())
+}
+
+async fn process_blob_pack(
+    mut blob_pack: BlobPack,
+    out: &mut SourceSender,
+    log_namespace: &LogNamespace,
+    decoder: Decoder,
+) -> Result<(), ()> {
+    let mut output_stream = stream! {
+        // TODO: consider selecting with a shutdown
+        while let Some(row) = blob_pack.row_stream.next().await {
+            let deser_result = decoder.deserializer_parse(Bytes::from(row));
+            if deser_result.is_err(){
+                continue;
+            }
+            let (events, _) = deser_result.unwrap();
+            for mut event in events.into_iter(){
+                match event {
+                    Event::Log(ref mut log_event) => {
+                        log_namespace.insert_source_metadata(
+                            AzureBlobConfig::NAME,
+                            log_event,
+                            Some(LegacyKey::Overwrite("ingest_timestamp")),
+                            path!("ingest_timestamp"),
+                            chrono::Utc::now().to_rfc3339(),
+                        );
+                        yield event
+                    }
+                    _ => {
+                        error!("Expected Azure rows as Log Events, but got {:?}.", event);
+                    }
+                }
+            }
+        }
+    }
+    .boxed();
+    out.send_event_stream(&mut output_stream)
+        .await
+        .map_err(|e| {
+            error!("Failed to build decoder: {}", e);
+            ()
+        })?;
     Ok(())
 }
 
@@ -250,17 +257,18 @@ impl SourceConfig for AzureBlobConfig {
                 let exec_interval_secs = self.exec_interval_secs;
                 let shutdown = cx.shutdown.clone();
                 stream! {
-                    yield BlobPack{
-                        row_stream: stream! {
-                            let schedule = Duration::from_secs(exec_interval_secs);
-                            let mut counter = 0;
-                            let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown);
-                            while interval.next().await.is_some() {
-                                counter += 1;
-                                // yield counter string as Vec<u8>
-                                yield counter.to_string().into_bytes();
-                            }
-                        }.boxed()
+                    let schedule = Duration::from_secs(exec_interval_secs);
+                    let mut counter = 0;
+                    let mut interval = IntervalStream::new(time::interval(schedule)).take_until(shutdown);
+                    while interval.next().await.is_some() {
+                        counter += 1;
+                        yield BlobPack {
+                            row_stream: stream! {
+                                for i in 0..counter {
+                                    yield format!("{}:{}", counter, i).into_bytes();
+                                }
+                            }.boxed()
+                        }
                     }
                 }.boxed()
             }
