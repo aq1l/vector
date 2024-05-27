@@ -1,13 +1,12 @@
-use std::{io::ErrorKind, pin::Pin, time::Duration};
+use std::pin::Pin;
+use std::time::Duration;
 
 use async_stream::stream;
-use azure_core::Pageable;
-use azure_storage_blobs::blob::operations::GetBlobResponse;
 use bytes::Bytes;
-use futures::{stream, stream::StreamExt, Stream, TryStreamExt};
+use futures::stream::StreamExt;
+use futures::Stream;
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
-use tokio_util::io::StreamReader;
 use vrl::path;
 
 use vector_lib::codecs::decoding::{
@@ -201,8 +200,7 @@ async fn run_streaming(
                 }
             }
         }
-    }
-    .boxed();
+    }.boxed();
     out.send_event_stream(&mut output_stream)
         .await
         .map_err(|e| {
@@ -268,25 +266,4 @@ impl SourceConfig for AzureBlobConfig {
 
 fn default_exec_interval_secs() -> u64 {
     1
-}
-
-async fn azure_blob_decoder(
-    body: Pageable<GetBlobResponse, azure_core::Error>,
-) -> Box<dyn tokio::io::AsyncRead + Send + Unpin> {
-    let first = if let Some(first) = body.next().await {
-        first
-    } else {
-        return Box::new(tokio::io::empty());
-    };
-
-    let r = tokio::io::BufReader::new(StreamReader::new(
-        stream::iter(Some(first))
-            .chain(Box::pin(async_stream::stream! {
-                while let Some(next) = body.next().await {
-                    yield next;
-                }
-            }))
-            .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
-    ));
-    r
 }
