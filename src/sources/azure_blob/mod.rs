@@ -14,14 +14,15 @@ use vector_lib::codecs::decoding::{
 };
 use vector_lib::codecs::NewlineDelimitedDecoderConfig;
 use vector_lib::config::LegacyKey;
+use vector_lib::internal_event::{CountByteSize, InternalEventHandle as _};
 use vector_lib::sensitive_string::SensitiveString;
 
 use crate::codecs::{Decoder, DecodingConfig};
 use crate::config::{
     LogNamespace, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
 };
-use crate::event::{BatchNotifier, BatchStatus, Event};
-use crate::internal_events::StreamClosedError;
+use crate::event::{BatchNotifier, BatchStatus, EstimatedJsonEncodedSizeOf, Event};
+use crate::internal_events::{EventsReceived, StreamClosedError};
 use crate::serde::{bool_or_struct, default_decoding};
 use crate::shutdown::ShutdownSignal;
 use crate::sinks::prelude::configurable_component;
@@ -219,6 +220,8 @@ async fn process_blob_pack(
     decoder: Decoder,
     acknowledge: bool,
 ) -> Result<(), ()> {
+    let events_received = register!(EventsReceived);
+    events_received.emit(CountByteSize(1, 1.into()));
     let (batch, receiver) = BatchNotifier::maybe_new_with_receiver(acknowledge);
     let mut row_stream = blob_pack.row_stream;
     let mut output_stream = stream! {
@@ -242,6 +245,7 @@ async fn process_blob_pack(
                             path!("ingest_timestamp"),
                             chrono::Utc::now().to_rfc3339(),
                         );
+                        events_received.emit(CountByteSize(1, event.estimated_json_encoded_size_of()));
                         yield event
                     }
                     _ => {

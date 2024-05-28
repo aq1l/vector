@@ -17,8 +17,10 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_with::serde_as;
 
-use crate::sinks::prelude::configurable_component;
-use crate::sources::azure_blob::{AzureBlobConfig, BlobPack, BlobPackStream};
+use crate::{
+    sinks::prelude::configurable_component,
+    sources::azure_blob::{AzureBlobConfig, BlobPack, BlobPackStream},
+};
 
 /// Azure Queue configuration options.
 #[serde_as]

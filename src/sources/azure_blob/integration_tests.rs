@@ -81,11 +81,48 @@ impl AzureBlobConfig {
 
         response.expect("Failed to create queue")
     }
+
+    async fn upload_blob(&self) {
+        let container_client =
+            make_container_client(self).expect("Failed to create container client");
+        let blob_client = container_client.blob_client("asdf");
+        let content = r#"{
+            "timestamp": "123",
+        }"#;
+        blob_client.put_block_blob(content);
+
+        let queue_client = make_queue_client(self).expect("Failed to create queue client");
+        let message = r#"{
+          "topic": "/subscriptions/fa5f2180-1451-4461-9b1f-aae7d4b33cf8/resourceGroups/events_poc/providers/Microsoft.Storage/storageAccounts/eventspocaccount",
+          "subject": "/blobServices/default/containers/logs/blobs/asdf",
+          "eventType": "Microsoft.Storage.BlobCreated",
+          "id": "be3f21f7-201e-000b-7605-a29195062628",
+          "data": {
+            "api": "PutBlob",
+            "clientRequestId": "1fa42c94-6dd3-4172-95c4-fd9cf56b5009",
+            "requestId": "be3f21f7-201e-000b-7605-a29195000000",
+            "eTag": "0x8DC701C5D3FFDF6",
+            "contentType": "application/octet-stream",
+            "contentLength": 0,
+            "blobType": "BlockBlob",
+            "url": "https://eventspocaccount.blob.core.windows.net/content/foo",
+            "sequencer": "0000000000000000000000000005C5360000000000276a63",
+            "storageDiagnostics": {
+              "batchId": "fec5b12c-2006-0034-0005-a25936000000"
+            }
+          },
+          "dataVersion": "",
+          "metadataVersion": "1",
+          "eventTime": "2024-05-09T11:37:10.5637878Z"
+        }"#;
+        queue_client.put_message(message);
+    }
 }
 
 #[tokio::test]
 async fn azure_blob_read_lines_from_blob() {
     let config = AzureBlobConfig::new_emulator().await;
+    config.upload_blob().await;
 
     let _events = config.run_assert().await;
     assert_eq!(1, 2);
