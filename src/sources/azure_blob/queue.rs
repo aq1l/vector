@@ -7,7 +7,10 @@ use std::{
 use crate::azure;
 use async_stream::stream;
 use azure_storage_blobs;
+use azure_storage_blobs::prelude::ContainerClient;
 use azure_storage_queues;
+use azure_storage_queues::operations::Message;
+use azure_storage_queues::QueueClient;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use futures::stream::StreamExt;
@@ -38,69 +41,19 @@ pub fn make_azure_row_stream(cfg: &AzureBlobConfig) -> crate::Result<BlobPackStr
             let messages = match queue_client.get_messages().await {
                 Ok(messages) => messages,
                 Err(e) => {
-                    error!("Failed reading messages: {}", e);
+                    error!("Failed reading messages: {}", e); // TODO: consider emit!
                     continue;
                 }
             };
 
             for message in messages.messages {
-                let decoded_bytes = BASE64_STANDARD
-                    .decode(&message.message_text)
-                    .expect("Failed decoding message");
-                let decoded_string = String::from_utf8(decoded_bytes).expect("Failed decoding UTF");
-                let body: AzureStorageEvent =
-                    serde_json::from_str(decoded_string.as_str()).expect("Wrong JSON");
-                // TODO get the event type const from library?
-                if body.event_type != "Microsoft.Storage.BlobCreated" {
-                    info!(
-                        "Ignoring event because of wrong event type: {}",
-                        body.event_type
-                    );
-                    continue;
+                let msg_id = message.message_id.clone();
+                match proccess_event_grid_message(message, &container_client, &queue_client).await {
+                    Some(blob_pack) => yield blob_pack,
+                    None => info!("Message {msg_id} failed to be processed, \
+                            no blob stream stream created from it. \
+                            Will retry on next message."),
                 }
-                // TODO some smarter parsing should be done here
-                let parts = body.subject.split("/").collect::<Vec<_>>();
-                let container = parts[4];
-                // TODO here we'd like to check if container matches the container
-                // from config.
-                let blob = parts[6];
-                info!(
-                    "New blob created in container '{}': '{}'",
-                    &container, &blob
-                );
-
-                let blob_client = container_client.blob_client(blob);
-                let mut result: Vec<u8> = vec![];
-                let mut stream = blob_client.get().into_stream();
-                while let Some(value) = stream.next().await {
-                    let mut body = value.unwrap().data;
-                    while let Some(value) = body.next().await {
-                        let value = value.expect("Failed to read body chunk");
-                        result.extend(&value);
-                    }
-                }
-
-                let reader = Cursor::new(result);
-                let buffered = BufReader::new(reader);
-                let queue_client_copy = queue_client.clone();
-
-                yield BlobPack{
-                    row_stream: Box::pin(stream! {
-                        for line in buffered.lines() {
-                            let line = line.map(|line| line.as_bytes().to_vec());
-                            yield line.expect("ASDF");
-                        }
-                    }),
-                    success_handler: Box::new(|| {
-                        Box::pin(async move {
-                            queue_client_copy
-                                .pop_receipt_client(message)
-                                .delete()
-                                .await
-                                .expect("Failed removing messages from queue");
-                        })
-                    }),
-                };
             }
         }
     }))
@@ -138,6 +91,85 @@ pub fn make_container_client(
 struct AzureStorageEvent {
     pub subject: String,
     pub event_type: String,
+}
+
+async fn proccess_event_grid_message(
+    message: Message,
+    container_client: &ContainerClient,
+    queue_client: &QueueClient,
+) -> Option<BlobPack> {
+    let decoded_bytes = match BASE64_STANDARD.decode(&message.message_text) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            error!("Failed decoding base64: {}", e);
+            return None;
+        }
+    };
+    let decoded_string = match String::from_utf8(decoded_bytes) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            error!("Failed decoding utf8: {}", e);
+            return None;
+        }
+    };
+    let body: AzureStorageEvent = match serde_json::from_str(decoded_string.as_str()) {
+        Ok(body) => body,
+        Err(e) => {
+            error!("Failed decoding json: {}", e);
+            return None;
+        }
+    };
+    // TODO get the event type const from library?
+    if body.event_type != "Microsoft.Storage.BlobCreated" {
+        warn!(
+            "Ignoring event because of wrong event type: {}",
+            body.event_type
+        );
+        return None;
+    }
+    // TODO some smarter parsing should be done here
+    let parts = body.subject.split("/").collect::<Vec<_>>();
+    let container = parts[4];
+    // TODO here we'd like to check if container matches the container
+    // from config.
+    let blob = parts[6];
+    info!(
+        "New blob created in container '{}': '{}'",
+        &container, &blob
+    );
+
+    let blob_client = container_client.blob_client(blob);
+    let mut result: Vec<u8> = vec![];
+    let mut stream = blob_client.get().into_stream();
+    while let Some(value) = stream.next().await {
+        let mut body = value.unwrap().data;
+        while let Some(value) = body.next().await {
+            let value = value.expect("Failed to read body chunk");
+            result.extend(&value);
+        }
+    }
+
+    let reader = Cursor::new(result);
+    let buffered = BufReader::new(reader);
+    let queue_client_copy = queue_client.clone();
+
+    Some(BlobPack {
+        row_stream: Box::pin(stream! {
+            for line in buffered.lines() {
+                let line = line.map(|line| line.as_bytes().to_vec());
+                yield line.expect("ASDF");
+            }
+        }),
+        success_handler: Box::new(|| {
+            Box::pin(async move {
+                queue_client_copy
+                    .pop_receipt_client(message)
+                    .delete()
+                    .await
+                    .expect("Failed removing messages from queue");
+            })
+        }),
+    })
 }
 
 #[test]
