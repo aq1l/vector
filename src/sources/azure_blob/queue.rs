@@ -35,8 +35,13 @@ pub fn make_azure_row_stream(cfg: &AzureBlobConfig) -> crate::Result<BlobPackStr
     Ok(Box::pin(stream! {
         // TODO: add a way to stop this loop, possibly with shutdown
         loop {
-            let messages_result = queue_client.get_messages().await;
-            let messages = messages_result.expect("Failed reading messages");
+            let messages = match queue_client.get_messages().await {
+                Ok(messages) => messages,
+                Err(e) => {
+                    error!("Failed reading messages: {}", e);
+                    continue;
+                }
+            };
 
             for message in messages.messages {
                 let decoded_bytes = BASE64_STANDARD
