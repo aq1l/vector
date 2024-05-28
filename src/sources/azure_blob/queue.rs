@@ -4,18 +4,18 @@ use std::{
     sync::Arc,
 };
 
+use crate::azure;
 use async_stream::stream;
 use azure_storage_blobs;
 use azure_storage_queues;
-use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_with::serde_as;
-use crate::azure;
 
 use crate::sinks::prelude::configurable_component;
-use crate::sources::azure_blob::{AzureBlobConfig, BlobStream};
+use crate::sources::azure_blob::{AzureBlobConfig, BlobPack, BlobPackStream};
 
 /// Azure Queue configuration options.
 #[serde_as]
@@ -28,9 +28,7 @@ pub(super) struct Config {
     pub(super) queue_name: String,
 }
 
-pub fn make_azure_row_stream(
-    cfg: &AzureBlobConfig
-) -> crate::Result<BlobStream> {
+pub fn make_azure_row_stream(cfg: &AzureBlobConfig) -> crate::Result<BlobPackStream> {
     let queue_client = make_queue_client(cfg)?;
     let container_client = make_container_client(cfg)?;
 
@@ -79,21 +77,33 @@ pub fn make_azure_row_stream(
 
                 let reader = Cursor::new(result);
                 let buffered = BufReader::new(reader);
-                queue_client
-                    .pop_receipt_client(message)
-                    .delete()
-                    .await
-                    .expect("Failed removing messages from queue");
-                for line in buffered.lines() {
-                    let line = line.map(|line| line.as_bytes().to_vec());
-                    yield line.expect("ASDF");
-                }
+                let queue_client_copy = queue_client.clone();
+
+                yield BlobPack{
+                    row_stream: Box::pin(stream! {
+                        for line in buffered.lines() {
+                            let line = line.map(|line| line.as_bytes().to_vec());
+                            yield line.expect("ASDF");
+                        }
+                    }),
+                    success_handler: Box::new(|| {
+                        Box::pin(async move {
+                            queue_client_copy
+                                .pop_receipt_client(message)
+                                .delete()
+                                .await
+                                .expect("Failed removing messages from queue");
+                        })
+                    }),
+                };
             }
         }
     }))
 }
 
-fn make_queue_client(cfg: &AzureBlobConfig) -> crate::Result<Arc<azure_storage_queues::QueueClient>> {
+fn make_queue_client(
+    cfg: &AzureBlobConfig,
+) -> crate::Result<Arc<azure_storage_queues::QueueClient>> {
     let q = cfg.queue.clone().ok_or("Missing queue.")?;
     azure::build_queue_client(
         cfg.connection_string
@@ -105,7 +115,9 @@ fn make_queue_client(cfg: &AzureBlobConfig) -> crate::Result<Arc<azure_storage_q
     )
 }
 
-fn make_container_client(cfg: &AzureBlobConfig) -> crate::Result<Arc<azure_storage_blobs::prelude::ContainerClient>> {
+fn make_container_client(
+    cfg: &AzureBlobConfig,
+) -> crate::Result<Arc<azure_storage_blobs::prelude::ContainerClient>> {
     azure::build_container_client(
         cfg.connection_string
             .as_ref()
