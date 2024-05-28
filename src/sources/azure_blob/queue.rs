@@ -101,7 +101,7 @@ pub fn make_azure_row_stream(cfg: &AzureBlobConfig) -> crate::Result<BlobPackStr
     }))
 }
 
-fn make_queue_client(
+pub fn make_queue_client(
     cfg: &AzureBlobConfig,
 ) -> crate::Result<Arc<azure_storage_queues::QueueClient>> {
     let q = cfg.queue.clone().ok_or("Missing queue.")?;
@@ -115,7 +115,7 @@ fn make_queue_client(
     )
 }
 
-fn make_container_client(
+pub fn make_container_client(
     cfg: &AzureBlobConfig,
 ) -> crate::Result<Arc<azure_storage_blobs::prelude::ContainerClient>> {
     azure::build_container_client(

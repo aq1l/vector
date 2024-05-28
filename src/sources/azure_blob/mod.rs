@@ -28,6 +28,8 @@ use crate::sinks::prelude::configurable_component;
 use crate::sources::azure_blob::queue::make_azure_row_stream;
 use crate::SourceSender;
 
+#[cfg(all(test, feature = "azure-blob-source-integration-tests"))]
+mod integration_tests;
 pub mod queue;
 
 /// Strategies for consuming objects from Azure Storage.
@@ -136,8 +138,15 @@ impl AzureBlobConfig {
                 if self.queue.is_none() || self.queue.as_ref().unwrap().queue_name.is_empty() {
                     return Err("Azure event grid queue must be set.".into());
                 }
-                if self.storage_account.clone().unwrap_or_default().is_empty() {
-                    return Err("Azure Storage Account must be set.".into());
+                if self.storage_account.clone().unwrap_or_default().is_empty()
+                    && self
+                        .connection_string
+                        .clone()
+                        .unwrap_or_default()
+                        .inner()
+                        .is_empty()
+                {
+                    return Err("Azure Storage Account or Connection String must be set.".into());
                 }
                 if self.container_name.is_empty() {
                     return Err("Azure Container must be set.".into());
@@ -262,12 +271,11 @@ async fn process_blob_pack(
         error!("Failed to send event stream: {}.", send_error);
         let (count, _) = output_stream.size_hint();
         emit!(StreamClosedError { count });
-        return Ok(())
+        return Ok(());
     }
 
     // dropping like s3 sender
-    drop(output_stream);  // TODO: better explanation
-
+    drop(output_stream); // TODO: better explanation
 
     // Run success handler if there are no errors in send or acknowledgement.
     match receiver {
@@ -279,7 +287,7 @@ async fn process_blob_pack(
                 BatchStatus::Errored => {
                     // TODO: emit a proper error
                     error!("Batch event had a transient error in delivery.")
-                },
+                }
                 BatchStatus::Rejected => {
                     // TODO: emit a proper error
                     // TODO: consider allowing rejected events wihtout retrying, like s3
@@ -288,7 +296,6 @@ async fn process_blob_pack(
             }
         }
     }
-
 
     Ok(())
 }

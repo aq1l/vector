@@ -96,9 +96,9 @@ pub fn build_queue_client(
         (Some(connection_string_p), None) => {
             let connection_string = ConnectionString::new(&connection_string_p)?;
 
-            client = match connection_string.blob_endpoint {
-                // When the blob_endpoint is provided, we use the Custom CloudLocation since it is
-                // required to contain the full URI to the blob storage API endpoint, this means
+            client = match connection_string.queue_endpoint {
+                // When the queue_endpoint is provided, we use the Custom CloudLocation since it is
+                // required to contain the full URI to the storage queue API endpoint, this means
                 // that account_name is not required to exist in the connection_string since
                 // account_name is only used with the default CloudLocation in the Azure SDK to
                 // generate the storage API endpoint
@@ -108,7 +108,7 @@ pub fn build_queue_client(
                     },
                     connection_string.storage_credentials()?,
                 ),
-                // Without a valid blob_endpoint in the connection_string, assume we are in Azure
+                // Without a valid queue_endpoint in the connection_string, assume we are in Azure
                 // Commercial (AzureCloud location) and create a default Blob Storage Client that
                 // builds the API endpoint location using the account_name as input
                 None => azure_storage_queues::QueueServiceClientBuilder::new(
@@ -128,8 +128,8 @@ pub fn build_queue_client(
             let storage_credentials = StorageCredentials::token_credential(auto_creds);
 
             client = match endpoint {
-                // If a blob_endpoint is provided in the configuration, use it with a Custom
-                // CloudLocation, to allow overriding the blob storage API endpoint
+                // If a queue_endpoint is provided in the configuration, use it with a Custom
+                // CloudLocation, to allow overriding the storage queue API endpoint
                 Some(endpoint) => azure_storage_queues::QueueServiceClientBuilder::with_location(
                     CloudLocation::Custom { uri: endpoint },
                     storage_credentials,
