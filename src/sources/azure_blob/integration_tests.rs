@@ -1,5 +1,6 @@
 use azure_core::error::HttpError;
 use azure_storage_blobs::prelude::PublicAccess;
+use base64::{prelude::BASE64_STANDARD, Engine};
 use http::StatusCode;
 
 use super::{
@@ -40,7 +41,7 @@ impl AzureBlobConfig {
     }
 
     async fn run_assert(&self) -> Vec<Event> {
-        run_and_assert_source_compliance(self.clone(), Duration::from_secs(2), &SOURCE_TAGS).await
+        run_and_assert_source_compliance(self.clone(), Duration::from_secs(1), &SOURCE_TAGS).await
     }
 
     async fn ensure_container(&self) {
@@ -89,7 +90,10 @@ impl AzureBlobConfig {
         let content = r#"{
             "timestamp": "123",
         }"#;
-        blob_client.put_block_blob(content);
+        blob_client
+            .put_block_blob(content)
+            .await
+            .expect("Failed putting blob");
 
         let queue_client = make_queue_client(self).expect("Failed to create queue client");
         let message = r#"{
@@ -105,7 +109,7 @@ impl AzureBlobConfig {
             "contentType": "application/octet-stream",
             "contentLength": 0,
             "blobType": "BlockBlob",
-            "url": "https://eventspocaccount.blob.core.windows.net/content/foo",
+            "url": "https://eventspocaccount.blob.core.windows.net/logs/asdf",
             "sequencer": "0000000000000000000000000005C5360000000000276a63",
             "storageDiagnostics": {
               "batchId": "fec5b12c-2006-0034-0005-a25936000000"
@@ -115,7 +119,10 @@ impl AzureBlobConfig {
           "metadataVersion": "1",
           "eventTime": "2024-05-09T11:37:10.5637878Z"
         }"#;
-        queue_client.put_message(message);
+        queue_client
+            .put_message(BASE64_STANDARD.encode(message))
+            .await
+            .expect("Failed putting message");
     }
 }
 
