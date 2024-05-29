@@ -16,6 +16,7 @@ use base64::Engine;
 use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_with::serde_as;
+use vector_lib::internal_event::{ByteSize, BytesReceived, InternalEventHandle, Protocol, Registered};
 
 use crate::{
     sinks::prelude::configurable_component,
@@ -36,6 +37,7 @@ pub(super) struct Config {
 pub fn make_azure_row_stream(cfg: &AzureBlobConfig) -> crate::Result<BlobPackStream> {
     let queue_client = make_queue_client(cfg)?;
     let container_client = make_container_client(cfg)?;
+    let bytes_received = register!(BytesReceived::from(Protocol::HTTP));
 
     Ok(Box::pin(stream! {
         // TODO: add a way to stop this loop, possibly with shutdown
@@ -50,7 +52,12 @@ pub fn make_azure_row_stream(cfg: &AzureBlobConfig) -> crate::Result<BlobPackStr
 
             for message in messages.messages {
                 let msg_id = message.message_id.clone();
-                match proccess_event_grid_message(message, &container_client, &queue_client).await {
+                match proccess_event_grid_message(
+                    message,
+                    &container_client,
+                    &queue_client,
+                    bytes_received.clone()
+                ).await {
                     Some(blob_pack) => yield blob_pack,
                     None => info!("Message {msg_id} failed to be processed, \
                             no blob stream stream created from it. \
@@ -99,6 +106,7 @@ async fn proccess_event_grid_message(
     message: Message,
     container_client: &ContainerClient,
     queue_client: &QueueClient,
+    bytes_received: Registered<BytesReceived>,
 ) -> Option<BlobPack> {
     let decoded_bytes = match BASE64_STANDARD.decode(&message.message_text) {
         Ok(decoded) => decoded,
@@ -154,12 +162,15 @@ async fn proccess_event_grid_message(
     let reader = Cursor::new(result);
     let buffered = BufReader::new(reader);
     let queue_client_copy = queue_client.clone();
+    let bytes_received_copy = bytes_received.clone();
 
     Some(BlobPack {
         row_stream: Box::pin(stream! {
             for line in buffered.lines() {
                 let line = line.map(|line| line.as_bytes().to_vec());
-                yield line.expect("ASDF");
+                let line = line.expect("ASDF");
+                bytes_received_copy.emit(ByteSize(line.len()));
+                yield line;
             }
         }),
         success_handler: Box::new(|| {
