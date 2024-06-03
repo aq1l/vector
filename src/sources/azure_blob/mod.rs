@@ -14,7 +14,7 @@ use vector_lib::codecs::decoding::{
 };
 use vector_lib::codecs::NewlineDelimitedDecoderConfig;
 use vector_lib::config::LegacyKey;
-use vector_lib::internal_event::{CountByteSize, InternalEventHandle as _};
+use vector_lib::internal_event::{CountByteSize, InternalEventHandle as _, Protocol};
 use vector_lib::sensitive_string::SensitiveString;
 
 use crate::codecs::{Decoder, DecodingConfig};
@@ -222,12 +222,13 @@ async fn process_blob_pack(
 ) -> Result<(), ()> {
     let events_received = register!(EventsReceived);
     events_received.emit(CountByteSize(1, 1.into()));
+    let bytes_received = register!(BytesReceived::from(Protocol::HTTP));
     let (batch, receiver) = BatchNotifier::maybe_new_with_receiver(acknowledge);
     let mut row_stream = blob_pack.row_stream;
     let mut output_stream = stream! {
         // TODO: consider selecting with a shutdown
         while let Some(row) = row_stream.next().await {
-
+            bytes_received.emit(CountByteSize(1, row.len().into()));
 
             let deser_result = decoder.deserializer_parse(Bytes::from(row));
             if deser_result.is_err(){
