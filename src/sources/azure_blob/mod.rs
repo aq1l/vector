@@ -14,7 +14,9 @@ use vector_lib::codecs::decoding::{
 };
 use vector_lib::codecs::NewlineDelimitedDecoderConfig;
 use vector_lib::config::LegacyKey;
-use vector_lib::internal_event::{CountByteSize, InternalEventHandle as _, Protocol};
+use vector_lib::internal_event::{
+    ByteSize, BytesReceived, CountByteSize, InternalEventHandle as _, Protocol,
+};
 use vector_lib::sensitive_string::SensitiveString;
 
 use crate::codecs::{Decoder, DecodingConfig};
@@ -228,7 +230,7 @@ async fn process_blob_pack(
     let mut output_stream = stream! {
         // TODO: consider selecting with a shutdown
         while let Some(row) = row_stream.next().await {
-            bytes_received.emit(CountByteSize(1, row.len().into()));
+            bytes_received.emit(ByteSize(row.len()));
 
             let deser_result = decoder.deserializer_parse(Bytes::from(row));
             if deser_result.is_err(){
