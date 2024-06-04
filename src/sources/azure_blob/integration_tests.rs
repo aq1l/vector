@@ -32,6 +32,7 @@ impl AzureBlobConfig {
                 exec_interval_secs: 0,
                 log_namespace: None,
                 decoding: default_decoding(),
+                client_credentials: None,
             };
 
         config.ensure_container().await;
