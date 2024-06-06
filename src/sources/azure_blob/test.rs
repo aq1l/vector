@@ -3,10 +3,7 @@ use crate::{
     config::LogNamespace, event::EventStatus, serde::default_decoding, shutdown::ShutdownSignal,
     test_util::collect_n, SourceSender,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use tokio::{select, sync::oneshot};
 
 #[tokio::test]
 async fn test_messages_delivered() {
@@ -19,8 +16,7 @@ async fn test_messages_delivered() {
         default_decoding(),
     );
     let mut streamer = streamer.expect("Failed to create streamer");
-    let success_called = Arc::new(AtomicBool::new(false));
-    let success_called_clone = success_called.clone();
+    let (success_sender, success_receiver) = oneshot::channel();
     let blob_pack = BlobPack {
         row_stream: Box::pin(stream! {
             let lines = vec!["foo", "bar"];
@@ -29,24 +25,30 @@ async fn test_messages_delivered() {
             }
         }),
         success_handler: Box::new(move || {
-            let success_called_clone = success_called_clone.clone();
             Box::pin(async move {
-                success_called_clone.store(true, Ordering::SeqCst);
+                success_sender.send(()).unwrap();
             })
         }),
     };
+    let (events_collector, events_receiver) = oneshot::channel();
+    tokio::spawn(async move {
+        events_collector.send(collect_n(rx, 2).await).unwrap();
+    });
     streamer
         .process_blob_pack(blob_pack)
         .await
         .expect("Failed processing blob pack");
 
-    let events = collect_n(rx, 2).await;
+    let events = select! {
+        value = events_receiver => value.expect("Failed to receive events"),
+        _ = time::sleep(Duration::from_secs(5)) => panic!("Timeout waiting for events"),
+    };
     assert_eq!(events[0].as_log().value().to_string(), "\"foo\"");
     assert_eq!(events[1].as_log().value().to_string(), "\"bar\"");
-    assert!(
-        success_called.load(Ordering::SeqCst),
-        "Success handler was not called"
-    );
+    select!{
+        _ = success_receiver => {}
+        _ = time::sleep(Duration::from_secs(5)) => panic!("Timeout waiting for success handler"),
+    }
 }
 
 #[tokio::test]
@@ -60,8 +62,7 @@ async fn test_messages_rejected() {
         default_decoding(),
     );
     let mut streamer = streamer.expect("Failed to create streamer");
-    let success_called = Arc::new(AtomicBool::new(false));
-    let success_called_clone = success_called.clone();
+    let (success_sender, success_receiver) = oneshot::channel();
     let blob_pack = BlobPack {
         row_stream: Box::pin(stream! {
             let lines = vec!["foo", "bar"];
@@ -70,22 +71,28 @@ async fn test_messages_rejected() {
             }
         }),
         success_handler: Box::new(move || {
-            let success_called_clone = success_called_clone.clone();
             Box::pin(async move {
-                success_called_clone.store(true, Ordering::SeqCst);
+                success_sender.send(()).unwrap();
             })
         }),
     };
+    let (events_collector, events_receiver) = oneshot::channel();
+    tokio::spawn(async move {
+        events_collector.send(collect_n(rx, 2).await).unwrap();
+    });
     streamer
         .process_blob_pack(blob_pack)
         .await
         .expect("Failed processing blob pack");
 
-    let events = collect_n(rx, 2).await;
+    let events = select! {
+        value = events_receiver => value.expect("Failed to receive events"),
+        _ = time::sleep(Duration::from_secs(5)) => panic!("Timeout waiting for events"),
+    };
     assert_eq!(events[0].as_log().value().to_string(), "\"foo\"");
     assert_eq!(events[1].as_log().value().to_string(), "\"bar\"");
-    assert!(
-        !success_called.load(Ordering::SeqCst),
-        "Success handler was called"
-    );
+    select!{
+        _ = success_receiver => panic!("Success handler should not have been called"),
+        _ = time::sleep(Duration::from_millis(100)) => {},
+    }
 }
