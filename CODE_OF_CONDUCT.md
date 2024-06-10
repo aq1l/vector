@@ -1,11 +1,12 @@
 # Code of Conduct
 
-- [Our Pledge](#our-pledge)
-- [Our Standards](#our-standards)
-- [Our Responsibilities](#our-responsibilities)
-- [Scope](#scope)
-- [Enforcement](#enforcement)
-- [Attribution](#attribution)
+- [Code of Conduct](#code-of-conduct)
+  - [Our Pledge](#our-pledge)
+  - [Our Standards](#our-standards)
+  - [Our Responsibilities](#our-responsibilities)
+  - [Scope](#scope)
+  - [Enforcement](#enforcement)
+  - [Attribution](#attribution)
 
 ## Our Pledge
 
