@@ -138,6 +138,9 @@ mod websocket;
 mod file;
 mod windows;
 
+#[cfg(any(feature = "sources-azure_blob", feature = "sources-azure_blob",))]
+mod azure_queue;
+
 #[cfg(feature = "sources-mongodb_metrics")]
 pub(crate) use mongodb_metrics::*;
 
@@ -267,6 +270,8 @@ pub(crate) use self::unix::*;
 pub(crate) use self::websocket::*;
 #[cfg(windows)]
 pub(crate) use self::windows::*;
+#[cfg(any(feature = "sources-azure_blob", feature = "sources-azure_blob",))]
+pub(crate) use self::azure_queue::*;
 pub use self::{
     adaptive_concurrency::*, batch::*, common::*, conditions::*, encoding_transcode::*,
     heartbeat::*, http::*, open::*, process::*, socket::*, tcp::*, template::*, udp::*,
