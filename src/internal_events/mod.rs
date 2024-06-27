@@ -270,7 +270,7 @@ pub(crate) use self::unix::*;
 pub(crate) use self::websocket::*;
 #[cfg(windows)]
 pub(crate) use self::windows::*;
-#[cfg(any(feature = "sources-azure_blob", feature = "sources-azure_blob",))]
+#[cfg(any(feature = "sources-azure_blob"))]
 pub(crate) use self::azure_queue::*;
 pub use self::{
     adaptive_concurrency::*, batch::*, common::*, conditions::*, encoding_transcode::*,

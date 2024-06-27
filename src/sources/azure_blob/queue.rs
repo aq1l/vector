@@ -78,7 +78,7 @@ pub fn make_azure_row_stream(
             for message in messages.messages {
                 let msg_id = message.message_id.clone();
                 match proccess_event_grid_message(
-                    message.clone(),
+                    message,
                     &container_client,
                     &queue_client,
                     bytes_received.clone()
@@ -94,7 +94,7 @@ pub fn make_azure_row_stream(
                     Err(e) => {
                         emit!(QueueMessageProcessingError{
                             error: &e,
-                            message_id: &message.message_id
+                            message_id: &msg_id
                         });
                     }
                 }
@@ -179,7 +179,7 @@ pub enum ProcessingError {
     #[snafu(display("Failed to parse {} as subject", subject))]
     FailedToParseSubject {
         subject: String,
-    }
+    },
 }
 
 async fn proccess_event_grid_message(
@@ -188,27 +188,16 @@ async fn proccess_event_grid_message(
     queue_client: &QueueClient,
     bytes_received: Registered<BytesReceived>,
 ) -> Result<Option<BlobPack>, ProcessingError> {
-    let decoded_bytes = match BASE64_STANDARD.decode(&message.message_text) {
-        Ok(decoded) => decoded,
-        Err(e) => {
-            return Err(ProcessingError::FailedDecodingMessageBase64 { error: e });
-        }
-    };
-    let decoded_string = match String::from_utf8(decoded_bytes) {
-        Ok(decoded) => decoded,
-        Err(e) => {
-            return Err(ProcessingError::FailedDecodingUTF8 { error: e });
-        }
-    };
-    let body: AzureStorageEvent = match serde_json::from_str(decoded_string.as_str()) {
-        Ok(body) => body,
-        Err(e) => {
-            return Err(ProcessingError::InvalidQueueMessage {
-                error: e,
-                message_id: message.message_id,
-            })
-        }
-    };
+    let msg_id = message.message_id.clone();
+    let decoded_bytes = BASE64_STANDARD.decode(&message.message_text)
+        .map_err(|e| ProcessingError::FailedDecodingMessageBase64 { error: e })?;
+    let decoded_string = String::from_utf8(decoded_bytes)
+        .map_err(|e| ProcessingError::FailedDecodingUTF8 { error: e })?;
+    let body: AzureStorageEvent = serde_json::from_str(decoded_string.as_str())
+        .map_err(|e| ProcessingError::InvalidQueueMessage {
+            error: e,
+            message_id: msg_id,
+        })?;
     if body.event_type != "Microsoft.Storage.BlobCreated" {
         emit!(QueueStorageInvalidEventIgnored{
            container: container_client.container_name(),
@@ -220,7 +209,6 @@ async fn proccess_event_grid_message(
     match parse_subject(body.subject.clone()) {
         Some((container, blob)) => {
             if container != container_client.container_name() {
-                trace!("Container name does not match. Skipping.");
                 return Err(ProcessingError::ContainerNameDoesntMatch {
                     container: container_client.container_name().to_string(),
                     message: container,
@@ -251,9 +239,7 @@ async fn proccess_event_grid_message(
                         }
                     }
                     Err(e) => {
-                        // Logging as trace, as it will be retired.
-                        trace!("Failed to get response: {}", e);
-                        return Err(ProcessingError::FailedToGetBlob {error: e});
+                        return Err(ProcessingError::FailedToGetBlob { error: e });
                     }
                 }
             }
@@ -293,8 +279,7 @@ async fn proccess_event_grid_message(
             }))
         }
         None => {
-            warn!("Failed parsing subject. Skipping.");
-            return Err(ProcessingError::FailedToParseSubject {subject: body.subject});
+            return Err(ProcessingError::FailedToParseSubject { subject: body.subject });
         }
     }
 }

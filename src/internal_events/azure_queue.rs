@@ -5,6 +5,7 @@ pub use azure_blob::*;
 
 #[cfg(feature = "sources-azure_blob")]
 mod azure_blob {
+    use crate::event::Event;
     use super::*;
     use crate::sources::azure_blob::queue::ProcessingError;
 
@@ -33,8 +34,32 @@ mod azure_blob {
             );
         }
     }
+
+    #[derive(Debug)]
+    pub struct InvalidRowEventType<'a> {
+        pub event: &'a Event,
+    }
+
+    impl<'a> InternalEvent for InvalidRowEventType<'a> {
+        fn emit(self) {
+            error!(
+                message = "Expected Azure rows as Log Events",
+                event = ?self.event,
+                error_code = "invalid_azure_row_event",
+                error_type = error_type::CONDITION_FAILED,
+                stage = error_stage::PROCESSING,
+            );
+            counter!(
+                "component_errors_total", 1,
+                "error_code" => "invalid_azure_row_event",
+                "error_type" => error_type::CONDITION_FAILED,
+                "stage" => error_stage::PROCESSING,
+            );
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct QueueMessageReceiveError<'a, E> {
     pub error: &'a E,
 }
@@ -57,6 +82,7 @@ impl<'a, E: std::fmt::Display> InternalEvent for QueueMessageReceiveError<'a, E>
     }
 }
 
+#[derive(Debug)]
 pub struct QueueMessageDeleteError<'a, E> {
     pub error: &'a E,
 }
@@ -88,8 +114,38 @@ pub struct QueueStorageInvalidEventIgnored<'a> {
 
 impl<'a> InternalEvent for QueueStorageInvalidEventIgnored<'a> {
     fn emit(self) {
-        warn!(message = "Ignoring event because of wrong event type",
+        trace!(message = "Ignoring event because of wrong event type",
             container = %self.container, subject = %self.subject, event_type = %self.event_type);
         counter!("azure_queue_event_ignored_total", 1, "ignore_type" => "invalid_event_type")
+    }
+}
+
+#[derive(Debug)]
+pub struct QueueMessageProcessingSucceeded {}
+
+impl InternalEvent for QueueMessageProcessingSucceeded {
+    fn emit(self) {
+        trace!(message = "Processed azure queue message successfully.");
+        counter!("azure_queue_message_processing_succeeded_total", 1);
+    }
+}
+
+#[derive(Debug)]
+pub struct QueueMessageProcessingErrored {}
+
+impl InternalEvent for QueueMessageProcessingErrored {
+    fn emit(self) {
+        error!(message = "Batch event had a transient error in delivery.");
+        counter!("azure_queue_message_processing_errored_total", 1);
+    }
+}
+
+#[derive(Debug)]
+pub struct QueueMessageProcessingRejected {}
+
+impl InternalEvent for QueueMessageProcessingRejected {
+    fn emit(self) {
+        error!(message = "Batch event had a permanent failure or rejection.");
+        counter!("azure_queue_message_processing_rejected_total", 1);
     }
 }
