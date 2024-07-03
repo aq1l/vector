@@ -1,12 +1,12 @@
-use metrics::counter;
-use vector_lib::internal_event::{error_stage, error_type, InternalEvent};
 #[cfg(feature = "sources-azure_blob")]
 pub use azure_blob::*;
+use metrics::counter;
+use vector_lib::internal_event::{error_stage, error_type, InternalEvent};
 
 #[cfg(feature = "sources-azure_blob")]
 mod azure_blob {
-    use crate::event::Event;
     use super::*;
+    use crate::event::Event;
     use crate::sources::azure_blob::queue::ProcessingError;
 
     #[derive(Debug)]
@@ -114,9 +114,16 @@ pub struct QueueStorageInvalidEventIgnored<'a> {
 
 impl<'a> InternalEvent for QueueStorageInvalidEventIgnored<'a> {
     fn emit(self) {
-        trace!(message = "Ignoring event because of wrong event type",
-            container = %self.container, subject = %self.subject, event_type = %self.event_type);
-        counter!("azure_queue_event_ignored_total", 1, "ignore_type" => "invalid_event_type")
+        trace!(
+            message = "Ignoring event because of wrong event type",
+            container = %self.container,
+            subject = %self.subject,
+            event_type = %self.event_type
+        );
+        counter!(
+            "azure_queue_event_ignored_total", 1,
+            "ignore_type" => "invalid_event_type"
+        )
     }
 }
 

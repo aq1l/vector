@@ -25,8 +25,10 @@ use crate::{
         LogNamespace, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
     },
     event::{BatchNotifier, BatchStatus, EstimatedJsonEncodedSizeOf, Event},
-    internal_events::{EventsReceived, StreamClosedError, InvalidRowEventType,
-                      QueueMessageProcessingSucceeded, QueueMessageProcessingErrored, QueueMessageProcessingRejected},
+    internal_events::{
+        EventsReceived, InvalidRowEventType, QueueMessageProcessingErrored,
+        QueueMessageProcessingRejected, QueueMessageProcessingSucceeded, StreamClosedError,
+    },
     serde::{bool_or_struct, default_decoding},
     shutdown::ShutdownSignal,
     sinks::prelude::configurable_component,
@@ -150,11 +152,11 @@ impl AzureBlobConfig {
                 }
                 if self.storage_account.clone().unwrap_or_default().is_empty()
                     && self
-                    .connection_string
-                    .clone()
-                    .unwrap_or_default()
-                    .inner()
-                    .is_empty()
+                        .connection_string
+                        .clone()
+                        .unwrap_or_default()
+                        .inner()
+                        .is_empty()
                 {
                     return Err("Azure Storage Account or Connection String must be set.".into());
                 }
@@ -173,14 +175,14 @@ impl AzureBlobConfig {
     }
 }
 
-type BlobStream = Pin<Box<dyn Stream<Item=Vec<u8>> + Send>>;
+type BlobStream = Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>;
 
 pub struct BlobPack {
     row_stream: BlobStream,
-    success_handler: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output=()> + Send>> + Send>,
+    success_handler: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>,
 }
 
-type BlobPackStream = Pin<Box<dyn Stream<Item=BlobPack> + Send>>;
+type BlobPackStream = Pin<Box<dyn Stream<Item = BlobPack> + Send>>;
 
 struct AzureBlobStreamer {
     shutdown: ShutdownSignal,
@@ -302,14 +304,14 @@ impl AzureBlobStreamer {
                 match result {
                     BatchStatus::Delivered => {
                         (blob_pack.success_handler)().await;
-                        emit!(QueueMessageProcessingSucceeded{});
+                        emit!(QueueMessageProcessingSucceeded {});
                     }
                     BatchStatus::Errored => {
-                        emit!(QueueMessageProcessingErrored{});
+                        emit!(QueueMessageProcessingErrored {});
                     }
                     BatchStatus::Rejected => {
                         // TODO: consider allowing rejected events wihtout retrying, like s3
-                        emit!(QueueMessageProcessingRejected{});
+                        emit!(QueueMessageProcessingRejected {});
                     }
                 }
             }

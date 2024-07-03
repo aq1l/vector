@@ -23,12 +23,12 @@ use vector_lib::{
 
 use crate::{
     azure,
-    shutdown::ShutdownSignal,
-    sources::azure_blob::{AzureBlobConfig, BlobPack, BlobPackStream},
     internal_events::{
-        QueueMessageReceiveError, QueueMessageDeleteError, QueueMessageProcessingError,
+        QueueMessageDeleteError, QueueMessageProcessingError, QueueMessageReceiveError,
         QueueStorageInvalidEventIgnored,
     },
+    shutdown::ShutdownSignal,
+    sources::azure_blob::{AzureBlobConfig, BlobPack, BlobPackStream},
 };
 
 /// Azure Queue configuration options.
@@ -151,35 +151,24 @@ pub enum ProcessingError {
         message_id: String,
     },
 
-    #[snafu(
-        display("Container name of message and container client doesn't match, container: {}, message {}",
-            container,
-            message)
-    )]
-    ContainerNameDoesntMatch {
-        container: String,
-        message: String,
-    },
+    #[snafu(display(
+        "Container name of message and container client doesn't match, container: {}, message {}",
+        container,
+        message
+    ))]
+    ContainerNameDoesntMatch { container: String, message: String },
 
     #[snafu(display("Failed to base64 decode message: {}", error))]
-    FailedDecodingMessageBase64 {
-        error: base64::DecodeError
-    },
+    FailedDecodingMessageBase64 { error: base64::DecodeError },
 
     #[snafu(display("Failed to utf8 decode message: {}", error))]
-    FailedDecodingUTF8 {
-        error: std::string::FromUtf8Error
-    },
+    FailedDecodingUTF8 { error: std::string::FromUtf8Error },
 
     #[snafu(display("Failed to get blob: {}", error))]
-    FailedToGetBlob {
-        error: azure_core::Error
-    },
+    FailedToGetBlob { error: azure_core::Error },
 
     #[snafu(display("Failed to parse {} as subject", subject))]
-    FailedToParseSubject {
-        subject: String,
-    },
+    FailedToParseSubject { subject: String },
 }
 
 async fn proccess_event_grid_message(
@@ -189,20 +178,22 @@ async fn proccess_event_grid_message(
     bytes_received: Registered<BytesReceived>,
 ) -> Result<Option<BlobPack>, ProcessingError> {
     let msg_id = message.message_id.clone();
-    let decoded_bytes = BASE64_STANDARD.decode(&message.message_text)
+    let decoded_bytes = BASE64_STANDARD
+        .decode(&message.message_text)
         .map_err(|e| ProcessingError::FailedDecodingMessageBase64 { error: e })?;
     let decoded_string = String::from_utf8(decoded_bytes)
         .map_err(|e| ProcessingError::FailedDecodingUTF8 { error: e })?;
-    let body: AzureStorageEvent = serde_json::from_str(decoded_string.as_str())
-        .map_err(|e| ProcessingError::InvalidQueueMessage {
+    let body: AzureStorageEvent = serde_json::from_str(decoded_string.as_str()).map_err(|e| {
+        ProcessingError::InvalidQueueMessage {
             error: e,
             message_id: msg_id,
-        })?;
+        }
+    })?;
     if body.event_type != "Microsoft.Storage.BlobCreated" {
-        emit!(QueueStorageInvalidEventIgnored{
-           container: container_client.container_name(),
-           subject: &body.subject,
-           event_type: &body.event_type,
+        emit!(QueueStorageInvalidEventIgnored {
+            container: container_client.container_name(),
+            subject: &body.subject,
+            event_type: &body.event_type,
         });
         return Ok(None);
     }
@@ -215,7 +206,7 @@ async fn proccess_event_grid_message(
                 });
             }
             trace!(
-                "New blob created in container '{}': '{}'",
+                "Detected new blob creation in container '{}': '{}'",
                 &container,
                 &blob
             );
@@ -268,18 +259,15 @@ async fn proccess_event_grid_message(
                     Box::pin(async move {
                         let res = queue_client_copy.pop_receipt_client(message).delete().await;
 
-                        match res {
-                            Ok(_) => {}
-                            Err(e) => {
-                                emit!(QueueMessageDeleteError{error: &e});
-                            }
-                        }
+                        res.map_err(|e| emit!(QueueMessageDeleteError { error: &e }))?;
                     })
                 }),
             }))
         }
         None => {
-            return Err(ProcessingError::FailedToParseSubject { subject: body.subject });
+            return Err(ProcessingError::FailedToParseSubject {
+                subject: body.subject,
+            });
         }
     }
 }
