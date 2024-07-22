@@ -261,7 +261,12 @@ async fn proccess_event_grid_message(
                     Box::pin(async move {
                         let res = queue_client_copy.pop_receipt_client(message).delete().await;
 
-                        res.map_err(|e| emit!(QueueMessageDeleteError { error: &e }))?;
+                        match res {
+                            Ok(_) => {}
+                            Err(e) => {
+                                emit!(QueueMessageDeleteError { error: &e })
+                            }
+                        }
                     })
                 }),
             }))
