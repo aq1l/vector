@@ -67,45 +67,47 @@ pub fn make_azure_row_stream(
     Ok(Box::pin(stream! {
         // TODO: add a way to stop this loop, possibly with shutdown
         loop {
-            let messages = match queue_client.get_messages().await {
+            let messages = match queue_client.get_messages().number_of_messages(num_messages()).await {
                 Ok(messages) => messages,
                 Err(e) => {
                     emit!(QueueMessageReceiveError{error: &e});
                     continue;
                 }
             };
-
-            for message in messages.messages {
-                let msg_id = message.message_id.clone();
-                match proccess_event_grid_message(
-                    message,
-                    &container_client,
-                    &queue_client,
-                    bytes_received.clone()
-                ).await {
-                    Ok(blob_pack) => {
-                        match blob_pack {
-                            None => trace!("Message {msg_id} is ignored, \
-                                            no blob stream stream created from it. \
-                                            Will retry on next message."),
-                            Some(bp) => yield bp
+            if !messages.messages.is_empty() {
+                for message in messages.messages {
+                    let msg_id = message.message_id.clone();
+                    match proccess_event_grid_message(
+                        message,
+                        &container_client,
+                        &queue_client,
+                        bytes_received.clone()
+                    ).await {
+                        Ok(blob_pack) => {
+                            match blob_pack {
+                                None => trace!("Message {msg_id} is ignored, \
+                                                no blob stream stream created from it. \
+                                                Will retry on next message."),
+                                Some(bp) => yield bp
+                            }
+                        },
+                        Err(e) => {
+                            emit!(QueueMessageProcessingError{
+                                error: &e,
+                                message_id: &msg_id
+                            });
                         }
-                    },
-                    Err(e) => {
-                        emit!(QueueMessageProcessingError{
-                            error: &e,
-                            message_id: &msg_id
-                        });
                     }
                 }
-            }
-            // allow shutdown to break sleeping
-            select! {
-                _ = shutdown.clone() => {
-                    info!("Shutdown signal received, terminating azure row stream.");
-                    break;
-                },
-                _ = time::sleep(poll_interval) => { }
+            } else {
+                // sleep or shutdown
+                select! {
+                    _ = shutdown.clone() => {
+                        info!("Shutdown signal received, terminating azure row stream.");
+                        break;
+                    },
+                    _ = time::sleep(poll_interval) => { }
+                }
             }
         }
     }))
@@ -285,6 +287,12 @@ fn parse_subject(subject: String) -> Option<(String, String)> {
 
 const fn default_poll_secs() -> u32 {
     15
+}
+
+// Number of messages to consume from the queue at once. This is the maximum
+// value allowed by the Azure API.
+const fn num_messages() -> u8 {
+    32
 }
 
 #[test]
